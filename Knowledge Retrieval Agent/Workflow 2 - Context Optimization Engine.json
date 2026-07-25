@@ -1,0 +1,523 @@
+{
+  "name": "2 - Context Optimization Engine",
+  "nodes": [
+    {
+      "parameters": {
+        "inputSource": "passthrough"
+      },
+      "type": "n8n-nodes-base.executeWorkflowTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        -368,
+        224
+      ],
+      "id": "93cb5b92-c4c4-4759-b5e4-a58591f1fdee",
+      "name": "When Executed by Another Workflow"
+    },
+    {
+      "parameters": {
+        "jsCode": "/**\n * Workflow 4 — Vector Retrieval Engine\n * Node 1: Retrieval Validation & Metadata Filtering\n *\n * Single Responsibility:\n *   - Confirm upstream retrieval (Workflow 3) actually succeeded.\n *   - Re-validate the similarity threshold at this layer (defense in depth —\n *     do not blindly trust upstream status flags, especially given observed\n *     scoring anomalies in Workflow 3's output — see architecture notes).\n *   - Apply metadata filters IF the caller supplied filter criteria.\n *\n * SCHEMA GAP:\n *   `search_request` (Workflow 3 output) currently has no `filters` object,\n *   and chunks have no `language`, `tags`, or business `version` fields.\n *   This node is written so filtering activates automatically the moment\n *   those fields exist upstream — no code change required. Until then,\n *   `filters_applied.requested` will simply be empty and everything passes.\n *\n * NO ranking, NO prompt building, NO LLM calls happen in this node.\n */\n\nconst items = $input.all();\nconst output = [];\n\n// ---- Configuration ----------------------------------------------------\nconst CONFIG = {\n  minChunksRequired: 1,\n  // Keys this node knows how to filter on IF present on both the request\n  // and the chunk. Extend this list when new metadata fields are added.\n  allowedFilterKeys: ['department', 'category', 'document_uuid', 'file_name', 'language', 'tags', 'version'],\n};\n\n// ---- Main ---------------------------------------------------------------\n\nfor (const item of items) {\n  const data = item.json ?? {};\n\n  const searchRequest = data.search_request ?? {};\n  const requestMetadata = data.request_metadata ?? {};\n  const retrieval = data.retrieval ?? {};\n  const retrievalMetrics = data.retrieval_metrics ?? {};\n  const retrievalAnalytics = data.retrieval_analytics ?? {};\n  const retrievalStatus = data.retrieval_status ?? {};\n  const upstreamSearchStatus = data.search_status;\n\n  const validationErrors = [];\n\n  // 1. Upstream status validation\n  if (upstreamSearchStatus !== 'ok') {\n    validationErrors.push(`Upstream search_status is \"${upstreamSearchStatus ?? 'undefined'}\", expected \"ok\".`);\n  }\n  if (retrievalStatus.status !== 'SUCCESS') {\n    validationErrors.push(`Upstream retrieval_status is \"${retrievalStatus.status ?? 'undefined'}\", expected \"SUCCESS\".`);\n  }\n\n  // 2. Chunk presence validation\n  const rawChunks = Array.isArray(retrieval.chunks) ? retrieval.chunks : [];\n  if (rawChunks.length < CONFIG.minChunksRequired) {\n    validationErrors.push(`No chunks returned by retrieval (found ${rawChunks.length}).`);\n  }\n\n  // 3. Threshold re-validation (defense in depth — do not trust upstream\n  //    filtering blindly; this also surfaces scoring anomalies such as a\n  //    flat, non-discriminating score across all results).\n  const threshold = typeof retrievalMetrics.threshold === 'number' ? retrievalMetrics.threshold : null;\n  let chunksAboveThreshold = rawChunks;\n  if (threshold !== null) {\n    chunksAboveThreshold = rawChunks.filter((c) => typeof c.score === 'number' && c.score >= threshold);\n    const droppedCount = rawChunks.length - chunksAboveThreshold.length;\n    if (droppedCount > 0) {\n      validationErrors.push(`${droppedCount} chunk(s) reported by upstream fell below threshold (${threshold}) on re-check.`);\n    }\n  }\n\n  // 3b. Score variance sanity check — surfaces the \"all scores identical\"\n  // anomaly instead of silently ranking on a dead signal downstream.\n  const distinctScores = new Set(chunksAboveThreshold.map((c) => c.score)).size;\n  const scoreVarianceWarning =\n    chunksAboveThreshold.length > 1 && distinctScores === 1\n      ? 'All chunks share an identical similarity score. Vector similarity is not discriminating relevance — verify the embedding/scoring step in Workflow 3 before trusting ranked output.'\n      : null;\n\n  // 4. Metadata filtering (only applied if criteria supplied)\n  const requestedFilters = {};\n  const filtersSource = searchRequest.filters ?? {};\n  for (const key of CONFIG.allowedFilterKeys) {\n    if (filtersSource[key] !== undefined && filtersSource[key] !== null && filtersSource[key] !== '') {\n      requestedFilters[key] = filtersSource[key];\n    }\n  }\n\n  let filteredChunks = chunksAboveThreshold;\n  if (Object.keys(requestedFilters).length > 0) {\n    filteredChunks = chunksAboveThreshold.filter((chunk) => {\n      return Object.entries(requestedFilters).every(([key, expected]) => {\n        const actual = chunk[key];\n        if (Array.isArray(expected)) {\n          return Array.isArray(actual) ? actual.some((v) => expected.includes(v)) : expected.includes(actual);\n        }\n        return actual === expected;\n      });\n    });\n  }\n\n  const isValid = validationErrors.length === 0 && filteredChunks.length > 0;\n\n  output.push({\n    json: {\n      search_request: searchRequest,\n      request_metadata: requestMetadata,\n      retrieval_metrics: retrievalMetrics,\n      retrieval_analytics: retrievalAnalytics,\n      validated_chunks: filteredChunks,\n      filters_applied: {\n        requested: requestedFilters,\n        chunks_before_filtering: chunksAboveThreshold.length,\n        chunks_after_filtering: filteredChunks.length,\n      },\n      validation_status: {\n        status: isValid ? 'VALID' : 'INVALID',\n        errors: validationErrors,\n        warnings: scoreVarianceWarning ? [scoreVarianceWarning] : [],\n      },\n    },\n  });\n}\n\nreturn output;"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -144,
+        224
+      ],
+      "id": "19ab78ef-7e0d-4985-a172-bff87b50cc44",
+      "name": "Retrieval Validation & Metadata Filtering",
+      "notes": "Retrieval Validation & Metadata Filtering: This node's responsibility is to act as a gate between Workflow 3's output and the ranking logic — it checks that the upstream retrieval actually succeeded (search_status === 'ok', retrieval_status.status === 'SUCCESS'), re-verifies that every chunk's similarity score still clears the threshold (defense in depth, since we can't blindly trust an upstream flag after having just found a real bug in that upstream step), and applies any caller-supplied metadata filters (department, category, document, etc.) if present. We used a separate node for this rather than folding it into ranking because validation and filtering are a different concern from scoring — one decides what evidence is even eligible to be considered, the other decides how eligible evidence is ordered. Keeping them separate also means Workflow 8's logging can capture validation failures (bad threshold, upstream error, empty result set) independently of ranking failures, which matters for debugging exactly the kind of pipeline bug we just found."
+    },
+    {
+      "parameters": {
+        "jsCode": "/**\n * Workflow 4 — Vector Retrieval Engine\n * Node 2: Composite Ranking & Diversity Engine\n *\n * Single Responsibility:\n *   - Compute a composite relevance score per chunk using ONLY signals that\n *     actually exist in the current schema.\n *   - Enforce diversity so one document cannot dominate the evidence set.\n *   - Produce ranked_evidence + ranking_analytics. NO prompt building, NO LLM.\n *\n * SCHEMA GAP — READ BEFORE CHANGING WEIGHTS:\n *   The architecture calls for ranking to weigh \"document authority\" and\n *   \"business priority\" alongside similarity. Neither field exists anywhere\n *   in the Workflow 1→3 pipeline output (no document_authority_score, no\n *   business_priority tag, no true document \"last updated\" date — only\n *   received_at, which is ingestion time, and workflow_version, which is a\n *   pipeline version number, not a document version).\n *\n *   Per project standards (never assume fields that don't exist, never\n *   generate placeholder code), these weights are set to 0 and marked\n *   DISABLED below rather than fed fabricated values. Recommendation: add\n *   `document_authority_score` (numeric) and `business_priority_tier`\n *   (enum) to document metadata in Workflow 1 intake. Once present, enable\n *   them here by changing RANKING_WEIGHTS — no other code changes needed.\n */\n\nconst items = $input.all();\nconst output = [];\n\n// ---- Configuration ------------------------------------------------------\nconst RANKING_WEIGHTS = {\n  similarity: 0.70,          // chunk.score — the only true relevance signal today\n  sectionStructure: 0.20,    // proxy from section_level + chunk_index (see below)\n  ingestionRecency: 0.10,    // proxy from received_at — NOT document freshness\n  documentAuthority: 0,      // DISABLED — field does not exist yet\n  businessPriority: 0,       // DISABLED — field does not exist yet\n};\n\nconst DIVERSITY_CONFIG = {\n  maxChunksPerDocument: 3,\n  enforceDiversity: true,\n};\n\n// ---- Helpers --------------------------------------------------------------\n\nfunction clamp01(n) {\n  if (typeof n !== 'number' || Number.isNaN(n)) return 0;\n  return Math.min(1, Math.max(0, n));\n}\n\n/**\n * Structural importance proxy in [0, 1]. Earlier chunks and higher-level\n * sections (section_level = 1) tend to carry title/purpose/definition\n * content, which is more useful as anchoring context.\n */\nfunction computeSectionStructureScore(chunk) {\n  const level = typeof chunk.section_level === 'number' && chunk.section_level > 0 ? chunk.section_level : 1;\n  const index = typeof chunk.chunk_index === 'number' ? chunk.chunk_index : 0;\n  const total = typeof chunk.total_chunks === 'number' && chunk.total_chunks > 0 ? chunk.total_chunks : 1;\n\n  const levelScore = 1 / level;\n  const positionScore = 1 - (index / total);\n\n  return clamp01((levelScore * 0.5) + (positionScore * 0.5));\n}\n\n/**\n * Ingestion recency proxy in [0, 1]. Reflects when the chunk was ingested\n * into the pipeline, NOT when the source document was authored or last\n * updated. Treated as a minor, secondary signal only — see weight above.\n */\nfunction computeIngestionRecencyScore(chunk, nowMs) {\n  if (!chunk.received_at) return 0.5; // neutral if missing\n  const receivedTime = Date.parse(chunk.received_at);\n  if (Number.isNaN(receivedTime)) return 0.5;\n\n  const ageDays = Math.max(0, (nowMs - receivedTime) / (1000 * 60 * 60 * 24));\n  const HALF_LIFE_DAYS = 180; // tune per business needs\n  return clamp01(Math.pow(0.5, ageDays / HALF_LIFE_DAYS));\n}\n\nfunction computeCompositeScore(chunk, nowMs) {\n  const similarity = clamp01(typeof chunk.score === 'number' ? chunk.score : 0);\n  const sectionStructure = computeSectionStructureScore(chunk);\n  const ingestionRecency = computeIngestionRecencyScore(chunk, nowMs);\n\n  const breakdown = {\n    similarity,\n    sectionStructure,\n    ingestionRecency,\n    documentAuthority: null, // disabled — no data\n    businessPriority: null,  // disabled — no data\n  };\n\n  const compositeScore =\n    (similarity * RANKING_WEIGHTS.similarity) +\n    (sectionStructure * RANKING_WEIGHTS.sectionStructure) +\n    (ingestionRecency * RANKING_WEIGHTS.ingestionRecency);\n\n  return { compositeScore: clamp01(compositeScore), breakdown };\n}\n\n/**\n * Diversity enforcement: sort by composite score, then greedily select\n * while respecting a per-document cap. If the cap would leave fewer chunks\n * than are available, backfill from the overflow so evidence is never\n * discarded unnecessarily in a small corpus.\n */\nfunction applyDiversity(scoredChunks, config) {\n  const sorted = [...scoredChunks].sort((a, b) => b.compositeScore - a.compositeScore);\n\n  if (!config.enforceDiversity) {\n    return { selected: sorted, diversityCapped: 0 };\n  }\n\n  const perDocCount = new Map();\n  const selected = [];\n  const overflow = [];\n\n  for (const chunk of sorted) {\n    const docId = chunk.document_uuid ?? 'unknown';\n    const count = perDocCount.get(docId) ?? 0;\n    if (count < config.maxChunksPerDocument) {\n      selected.push(chunk);\n      perDocCount.set(docId, count + 1);\n    } else {\n      overflow.push(chunk);\n    }\n  }\n\n  return { selected: [...selected, ...overflow], diversityCapped: overflow.length };\n}\n\n// ---- Main -------------------------------------------------------------------\n\nfor (const item of items) {\n  const data = item.json ?? {};\n  const validatedChunks = Array.isArray(data.validated_chunks) ? data.validated_chunks : [];\n  const validationStatus = data.validation_status ?? {};\n\n  if (validationStatus.status !== 'VALID' || validatedChunks.length === 0) {\n    output.push({\n      json: {\n        search_request: data.search_request ?? {},\n        request_metadata: data.request_metadata ?? {},\n        retrieval_analytics: data.retrieval_analytics ?? {},\n        ranked_evidence: [],\n        ranking_analytics: {\n          documents_represented: 0,\n          score_distribution: null,\n          diversity_capped_count: 0,\n          weights_used: RANKING_WEIGHTS,\n        },\n        status: {\n          status: 'FAILURE',\n          reason: validationStatus.errors?.length\n            ? validationStatus.errors.join(' ')\n            : 'No validated chunks available for ranking.',\n        },\n      },\n    });\n    continue;\n  }\n\n  const nowMs = Date.now();\n\n  const scored = validatedChunks.map((chunk) => {\n    const { compositeScore, breakdown } = computeCompositeScore(chunk, nowMs);\n    return { ...chunk, compositeScore, scoreBreakdown: breakdown };\n  });\n\n  const { selected, diversityCapped } = applyDiversity(scored, DIVERSITY_CONFIG);\n\n  const rankedEvidence = selected.map((chunk, idx) => ({\n    rank: idx + 1,\n    final_score: Number(chunk.compositeScore.toFixed(4)),\n    score_breakdown: chunk.scoreBreakdown,\n    chunk_uuid: chunk.chunk_uuid,\n    chunk_id: chunk.chunk_id,\n    document_uuid: chunk.document_uuid,\n    file_name: chunk.file_name,\n    section_title: chunk.section_title,\n    section_level: chunk.section_level,\n    category: chunk.category,\n    department: chunk.department,\n    text: chunk.text,\n    original_similarity_score: chunk.score,\n    // Added for Workflow 5 adjacency detection (merge adjacent chunks\n    // from the same document/section). Without these, Workflow 5 cannot\n    // tell that two chunks are consecutive parts of the same source text.\n    chunk_index: chunk.chunk_index,\n    total_chunks: chunk.total_chunks,\n    chunk_start: chunk.chunk_start,\n    chunk_end: chunk.chunk_end,\n  }));\n\n  const scores = rankedEvidence.map((c) => c.final_score);\n  const documentsRepresented = new Set(rankedEvidence.map((c) => c.document_uuid)).size;\n\n  output.push({\n    json: {\n      search_request: data.search_request ?? {},\n      request_metadata: data.request_metadata ?? {},\n      retrieval_analytics: data.retrieval_analytics ?? {},\n      ranked_evidence: rankedEvidence,\n      ranking_analytics: {\n        total_ranked: rankedEvidence.length,\n        documents_represented: documentsRepresented,\n        score_distribution: {\n          max: Math.max(...scores),\n          min: Math.min(...scores),\n          avg: Number((scores.reduce((a, b) => a + b, 0) / scores.length).toFixed(4)),\n        },\n        diversity_capped_count: diversityCapped,\n        weights_used: RANKING_WEIGHTS,\n      },\n      status: { status: 'SUCCESS', reason: 'Ranking and diversity enforcement completed.' },\n    },\n  });\n}\n\nreturn output;"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        80,
+        224
+      ],
+      "id": "3d73fd52-2844-4162-80a0-34a4c8877bce",
+      "name": "Composite Ranking & Diversity Engine",
+      "notes": "Composite Ranking & Diversity Engine: This node's responsibility is to take the validated chunk set and produce an ordered, diversity-enforced evidence list — computing a weighted composite score per chunk (similarity plus structural and recency proxies) and then applying a per-document cap so a single source document can't dominate the top results. We used a separate node here because ranking and diversity are themselves two distinct operations bundled for practical reasons: ranking decides how good each chunk is, diversity decides how the good chunks get distributed across documents, and both need to happen after validation has already guaranteed the input is trustworthy. Splitting this from Node 1 also means the ranking weights and diversity caps can be tuned or A/B tested without touching the validation/filtering logic at all — a change to RANKING_WEIGHTS doesn't risk breaking threshold checks, and vice versa. This node is explicitly barred from prompt building or LLM calls, per the architecture's separation of concerns — its only output is ranked_evidence and analytics for Workflow 5 to consume."
+    },
+    {
+      "parameters": {
+        "content": "Workflow 2.1  — Vector Retrieval Engine",
+        "height": 256,
+        "width": 432
+      },
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        -192,
+        144
+      ],
+      "id": "bb079005-959c-494e-98d8-243a39c2282a",
+      "name": "Sticky Note1"
+    },
+    {
+      "parameters": {
+        "content": "Workflow 2.2  — Context Construction Engine",
+        "height": 256,
+        "width": 432,
+        "color": 4
+      },
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        240,
+        144
+      ],
+      "id": "6fad9440-6775-4a42-9f41-1a0695f602e0",
+      "name": "Sticky Note2"
+    },
+    {
+      "parameters": {
+        "jsCode": "/**\n * Workflow 5 — Context Construction Engine\n * Node 1: Query Complexity Classification & Budget Allocation\n *\n * Single Responsibility:\n *   - Classify the query as SIMPLE / MEDIUM / COMPLEX using a text heuristic.\n *   - Translate that classification into a chunk budget and token budget for\n *     Node 2 to enforce.\n *\n * SCHEMA GAP / KNOWN LIMITATION:\n *   Classification here is a keyword + structure heuristic, not true NLP\n *   intent detection. It will misclassify edge cases (e.g. a short query\n *   that is nonetheless conceptually complex, or a long query that is\n *   simple). This is intentional — a real classifier would need either an\n *   LLM call (which the architecture explicitly forbids before Workflow 6)\n *   or a trained model neither of which exists yet. Treat this as a\n *   reasonable default, not a solved problem; tune COMPLEXITY_RULES below\n *   as real query patterns are observed in production.\n *\n * NO prompt building, NO LLM calls happen in this node.\n */\n\nconst items = $input.all();\nconst output = [];\n\n// ---- Configuration --------------------------------------------------------\n\nconst COMPLEXITY_RULES = {\n  // Words/phrases that strongly indicate a comparative or multi-part query.\n  comparisonMarkers: [\n    'compare', 'comparison', ' vs ', ' vs.', 'versus',\n    'difference between', 'differences between',\n    'which is better', 'pros and cons', 'better than',\n  ],\n  // Conjunctions that often join two distinct sub-questions.\n  multiPartMarkers: [' and how ', ' and what ', ' and why ', ' as well as '],\n  simpleMaxWordCount: 7,\n  mediumMaxWordCount: 14,\n};\n\nconst BUDGET_BY_COMPLEXITY = {\n  SIMPLE: { minChunks: 3, maxChunks: 5 },\n  MEDIUM: { minChunks: 5, maxChunks: 8 },\n  COMPLEX: { minChunks: 8, maxChunks: 12 },\n};\n\n// Fixed target regardless of complexity, per architecture spec (\"Target\n// 3500 tokens\"). If this should scale with complexity later, make this a\n// map instead of a constant — no other code changes would be needed.\nconst TOKEN_BUDGET_TARGET = 3500;\n\n// ---- Helpers ----------------------------------------------------------\n\nfunction countWords(text) {\n  if (!text || typeof text !== 'string') return 0;\n  return text.trim().split(/\\s+/).filter(Boolean).length;\n}\n\nfunction containsAny(haystack, needles) {\n  const lower = haystack.toLowerCase();\n  return needles.some((needle) => lower.includes(needle));\n}\n\n/**\n * Classifies query complexity using word count + structural markers.\n * Returns { level, indicators } where indicators explains *why*, useful\n * for debugging misclassifications later (surfaced in analytics, not logic).\n */\nfunction classifyComplexity(query) {\n  const q = (query ?? '').toLowerCase().trim();\n  const wordCount = countWords(q);\n  const indicators = [];\n\n  const hasComparison = containsAny(q, COMPLEXITY_RULES.comparisonMarkers);\n  const hasMultiPart = containsAny(q, COMPLEXITY_RULES.multiPartMarkers);\n  const questionMarkCount = (q.match(/\\?/g) ?? []).length;\n\n  if (hasComparison) indicators.push('comparison_marker');\n  if (hasMultiPart) indicators.push('multi_part_marker');\n  if (questionMarkCount > 1) indicators.push('multiple_question_marks');\n  indicators.push(`word_count:${wordCount}`);\n\n  if (hasComparison || hasMultiPart || questionMarkCount > 1) {\n    return { level: 'COMPLEX', indicators };\n  }\n  if (wordCount > COMPLEXITY_RULES.mediumMaxWordCount) {\n    return { level: 'COMPLEX', indicators };\n  }\n  if (wordCount > COMPLEXITY_RULES.simpleMaxWordCount) {\n    return { level: 'MEDIUM', indicators };\n  }\n  return { level: 'SIMPLE', indicators };\n}\n\n// ---- Main -------------------------------------------------------------\n\nfor (const item of items) {\n  const data = item.json ?? {};\n\n  const searchRequest = data.search_request ?? {};\n  const rankedEvidence = Array.isArray(data.ranked_evidence) ? data.ranked_evidence : [];\n  const retrievalAnalytics = data.retrieval_analytics ?? {};\n  const upstreamStatus = data.status ?? {};\n\n  // Defensive: if the upstream ranking step failed, don't attempt\n  // classification — pass the failure through unchanged.\n  if (upstreamStatus.status !== 'SUCCESS' || rankedEvidence.length === 0) {\n    output.push({\n      json: {\n        search_request: searchRequest,\n        ranked_evidence: rankedEvidence,\n        retrieval_analytics: retrievalAnalytics,\n        query_complexity: null,\n        status: {\n          status: 'FAILURE',\n          reason: 'No ranked evidence available for context construction.',\n        },\n      },\n    });\n    continue;\n  }\n\n  const queryText = searchRequest.normalized_query ?? searchRequest.query ?? '';\n  const { level, indicators } = classifyComplexity(queryText);\n  const budget = BUDGET_BY_COMPLEXITY[level];\n\n  output.push({\n    json: {\n      search_request: searchRequest,\n      ranked_evidence: rankedEvidence,\n      retrieval_analytics: retrievalAnalytics,\n      query_complexity: {\n        level,\n        indicators,\n        chunk_budget: budget,\n        token_budget: TOKEN_BUDGET_TARGET,\n      },\n      status: { status: 'SUCCESS', reason: 'Query complexity classified.' },\n    },\n  });\n}\n\nreturn output;"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        304,
+        224
+      ],
+      "id": "dde7760d-9442-474b-8f01-3fe1bb722713",
+      "name": "Query Complexity Classification & Budget Allocation"
+    },
+    {
+      "parameters": {
+        "jsCode": "/**\n * Workflow 5 — Context Construction Engine\n * Node 2: Dedup, Merge, Compress, Budget Enforcement & Ordering\n *\n * Single Responsibility:\n *   - Remove duplicate chunks.\n *   - Merge adjacent chunks (same document, consecutive chunk_index).\n *   - Compress merged text (strip repeated headings/whitespace).\n *   - Enforce the chunk + token budgets from Node 1.\n *   - Order surviving chunks into primary / supporting / background tiers.\n *   - Emit ONLY what Workflow 6 needs — no full retrieval/ranking payload.\n *\n * TOKEN ESTIMATION — SCALABILITY DECISION:\n *   No real Gemini tokenizer is used here, by design. A \"real\" tokenizer\n *   (e.g. a GPT BPE library) would still be an approximation for Gemini's\n *   own SentencePiece-based tokenizer, would add an npm dependency to\n *   maintain in the Docker n8n environment, and would need updating if the\n *   embedding/generation model changes. Instead this uses a character-based\n *   estimate (~4 characters per token for English/technical text, a widely\n *   used and fairly stable approximation across modern tokenizers) with a\n *   safety margin applied via TOKEN_ESTIMATE_SAFETY_FACTOR. This is\n *   portable, dependency-free, deterministic, and \"good enough\" given even\n *   a real tokenizer wouldn't be exact for this specific model. If token\n *   overruns are ever observed in practice, tighten\n *   TOKEN_ESTIMATE_SAFETY_FACTOR rather than reaching for a heavier\n *   dependency first.\n *\n * NO prompt building, NO LLM calls happen in this node.\n */\n\nconst items = $input.all();\nconst output = [];\n\n// ---- Configuration ------------------------------------------------------\n\nconst CHARS_PER_TOKEN_ESTIMATE = 4;\n// Inflate the raw estimate by this factor before comparing to budget, to\n// leave headroom for tokenizer variance and the prompt scaffolding\n// Workflow 6 will add around this context.\nconst TOKEN_ESTIMATE_SAFETY_FACTOR = 1.15;\n\n// Tier boundaries as a fraction of the score range within the *selected*\n// chunk set (not the full corpus) — top third = primary, etc.\nconst TIER_BOUNDARIES = { primary: 0.667, supporting: 0.333 };\n\n// ---- Helpers --------------------------------------------------------------\n\nfunction estimateTokens(text) {\n  if (!text) return 0;\n  const rawEstimate = text.length / CHARS_PER_TOKEN_ESTIMATE;\n  return Math.ceil(rawEstimate * TOKEN_ESTIMATE_SAFETY_FACTOR);\n}\n\n/**\n * Compresses merged text: collapses 3+ newlines to 2, strips leading/\n * trailing whitespace per line, removes an exact duplicate of the section\n * title if it appears again later in the merged body (common when merging\n * chunks whose text repeats the heading).\n */\nfunction compressText(text, sectionTitle) {\n  if (!text) return '';\n  let result = text.replace(/[ \\t]+\\n/g, '\\n').replace(/\\n{3,}/g, '\\n\\n').trim();\n\n  if (sectionTitle) {\n    const titleIndex = result.indexOf(sectionTitle);\n    if (titleIndex !== -1) {\n      const secondOccurrence = result.indexOf(sectionTitle, titleIndex + sectionTitle.length);\n      if (secondOccurrence !== -1) {\n        result =\n          result.slice(0, secondOccurrence) +\n          result.slice(secondOccurrence + sectionTitle.length);\n        result = result.replace(/\\n{3,}/g, '\\n\\n').trim();\n      }\n    }\n  }\n  return result;\n}\n\n/**\n * Groups chunks by document_uuid, sorts each group by chunk_index, and\n * merges runs of consecutive chunk_index values into single merged chunks.\n * Adjacency is determined strictly by chunk_index (see prior discussion —\n * chunk_start/chunk_end are per-chunk-relative, not document-absolute, so\n * they cannot be used for contiguity detection).\n */\nfunction mergeAdjacentChunks(chunks) {\n  const byDocument = new Map();\n  for (const chunk of chunks) {\n    const key = chunk.document_uuid ?? 'unknown';\n    if (!byDocument.has(key)) byDocument.set(key, []);\n    byDocument.get(key).push(chunk);\n  }\n\n  const merged = [];\n  for (const group of byDocument.values()) {\n    group.sort((a, b) => (a.chunk_index ?? 0) - (b.chunk_index ?? 0));\n\n    let current = null;\n    for (const chunk of group) {\n      const isAdjacent =\n        current !== null &&\n        typeof chunk.chunk_index === 'number' &&\n        typeof current.lastChunkIndex === 'number' &&\n        chunk.chunk_index === current.lastChunkIndex + 1;\n\n      if (isAdjacent) {\n        current.text = `${current.text}\\n\\n${chunk.text ?? ''}`.trim();\n        current.final_score = Math.max(current.final_score, chunk.final_score ?? 0);\n        current.source_chunk_uuids.push(chunk.chunk_uuid);\n        current.source_chunk_ids.push(chunk.chunk_id);\n        current.lastChunkIndex = chunk.chunk_index;\n      } else {\n        if (current) merged.push(current);\n        current = {\n          ...chunk,\n          text: chunk.text ?? '',\n          source_chunk_uuids: [chunk.chunk_uuid],\n          source_chunk_ids: [chunk.chunk_id],\n          lastChunkIndex: chunk.chunk_index,\n        };\n      }\n    }\n    if (current) merged.push(current);\n  }\n\n  return merged;\n}\n\n/**\n * Selects chunks under the chunk + token budgets. Assumes chunks are\n * pre-sorted descending by final_score. Stops adding once either budget\n * would be exceeded, always keeping at least one chunk if any exist.\n */\nfunction applyBudgets(chunks, chunkBudget, tokenBudget) {\n  const selected = [];\n  let tokenTotal = 0;\n\n  for (const chunk of chunks) {\n    if (selected.length >= chunkBudget.maxChunks) break;\n\n    const chunkTokens = estimateTokens(chunk.text);\n    const wouldExceedTokenBudget = tokenTotal + chunkTokens > tokenBudget;\n\n    if (wouldExceedTokenBudget && selected.length > 0) {\n      // Stop here — adding this chunk would blow the token budget, and we\n      // already have at least one chunk selected.\n      break;\n    }\n\n    selected.push(chunk);\n    tokenTotal += chunkTokens;\n  }\n\n  return { selected, tokenTotal };\n}\n\n/**\n * Assigns primary/supporting/background tiers based on each chunk's\n * final_score position within the selected set's own score range.\n */\nfunction assignTiers(chunks) {\n  if (chunks.length === 0) return chunks;\n\n  const scores = chunks.map((c) => c.final_score ?? 0);\n  const max = Math.max(...scores);\n  const min = Math.min(...scores);\n  const range = max - min;\n\n  return chunks.map((chunk) => {\n    const normalized = range === 0 ? 1 : (chunk.final_score - min) / range;\n    let tier;\n    if (normalized >= TIER_BOUNDARIES.primary) tier = 'primary';\n    else if (normalized >= TIER_BOUNDARIES.supporting) tier = 'supporting';\n    else tier = 'background';\n    return { ...chunk, tier };\n  });\n}\n\nconst TIER_ORDER = { primary: 0, supporting: 1, background: 2 };\n\n// ---- Main -----------------------------------------------------------------\n\nfor (const item of items) {\n  const data = item.json ?? {};\n  const searchRequest = data.search_request ?? {};\n  const rankedEvidence = Array.isArray(data.ranked_evidence) ? data.ranked_evidence : [];\n  const queryComplexity = data.query_complexity;\n  const upstreamStatus = data.status ?? {};\n\n  if (upstreamStatus.status !== 'SUCCESS' || !queryComplexity || rankedEvidence.length === 0) {\n    output.push({\n      json: {\n        context_request: { query: searchRequest.normalized_query ?? searchRequest.query ?? null },\n        optimized_context: '',\n        optimized_chunks: [],\n        source_map: [],\n        analytics: { total_selected: 0, token_estimate: 0 },\n        status: {\n          status: 'FAILURE',\n          reason: upstreamStatus.reason ?? 'No query complexity or ranked evidence available.',\n        },\n      },\n    });\n    continue;\n  }\n\n  // 1. Dedup by chunk_uuid.\n  const seen = new Set();\n  const deduped = rankedEvidence.filter((chunk) => {\n    if (!chunk.chunk_uuid || seen.has(chunk.chunk_uuid)) return false;\n    seen.add(chunk.chunk_uuid);\n    return true;\n  });\n\n  // 2. Merge adjacent chunks within the same document.\n  const merged = mergeAdjacentChunks(deduped);\n\n  // 3. Compress merged text.\n  for (const chunk of merged) {\n    chunk.text = compressText(chunk.text, chunk.section_title);\n  }\n\n  // 4. Re-sort by score (merging can change effective ranking) and apply budgets.\n  merged.sort((a, b) => (b.final_score ?? 0) - (a.final_score ?? 0));\n  const { selected, tokenTotal } = applyBudgets(\n    merged,\n    queryComplexity.chunk_budget,\n    queryComplexity.token_budget\n  );\n\n  // 5. Assign tiers, then order primary -> supporting -> background.\n  const tiered = assignTiers(selected);\n  tiered.sort((a, b) => TIER_ORDER[a.tier] - TIER_ORDER[b.tier] || (b.final_score - a.final_score));\n\n  // 6. Build the assembled context text, grouped by tier with headers.\n  const tierLabels = { primary: 'Primary Evidence', supporting: 'Supporting Evidence', background: 'Background Evidence' };\n  const sections = [];\n  for (const tierKey of ['primary', 'supporting', 'background']) {\n    const chunksInTier = tiered.filter((c) => c.tier === tierKey);\n    if (chunksInTier.length === 0) continue;\n    const body = chunksInTier\n      .map((c) => `### ${c.section_title ?? c.file_name ?? 'Untitled'}\\n${c.text}`)\n      .join('\\n\\n');\n    sections.push(`## ${tierLabels[tierKey]}\\n\\n${body}`);\n  }\n  const optimizedContext = sections.join('\\n\\n---\\n\\n');\n\n  // 7. Build optimized_chunks (structured) and source_map (attribution only).\n  const optimizedChunks = tiered.map((c, idx) => ({\n    order: idx + 1,\n    tier: c.tier,\n    text: c.text,\n    final_score: c.final_score,\n    document_uuid: c.document_uuid,\n    file_name: c.file_name,\n    section_title: c.section_title,\n  }));\n\n  const sourceMap = tiered.map((c) => ({\n    chunk_uuids: c.source_chunk_uuids,\n    chunk_ids: c.source_chunk_ids,\n    document_uuid: c.document_uuid,\n    file_name: c.file_name,\n    section_title: c.section_title,\n    final_score: c.final_score,\n  }));\n\n  output.push({\n    json: {\n      search_request: $json.search_request,\n      context_request: {\n        query: searchRequest.normalized_query ?? searchRequest.query ?? null,\n        complexity: queryComplexity.level,\n        chunk_budget: queryComplexity.chunk_budget,\n        token_budget: queryComplexity.token_budget,\n      },\n      optimized_context: optimizedContext,\n      optimized_chunks: optimizedChunks,\n      source_map: sourceMap,\n      analytics: {\n        chunks_before_dedup: rankedEvidence.length,\n        chunks_after_dedup: deduped.length,\n        chunks_after_merge: merged.length,\n        chunks_selected: selected.length,\n        token_estimate: tokenTotal,\n        token_budget: queryComplexity.token_budget,\n        tier_counts: {\n          primary: tiered.filter((c) => c.tier === 'primary').length,\n          supporting: tiered.filter((c) => c.tier === 'supporting').length,\n          background: tiered.filter((c) => c.tier === 'background').length,\n        },\n      },\n      status: { status: 'SUCCESS', reason: 'Context constructed within budget.' },\n    },\n  });\n}\n\nreturn output;"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        512,
+        224
+      ],
+      "id": "6fb9de64-1c1c-4290-a392-625b19344ae1",
+      "name": "Dedup, Merge, Compress, Budget Enforcement & Ordering"
+    },
+    {
+      "parameters": {
+        "promptType": "define",
+        "text": "={{ $json.userPrompt }}",
+        "hasOutputParser": true,
+        "needsFallback": true,
+        "messages": {
+          "messageValues": [
+            {
+              "message": "={{ $json.systemPrompt }}"
+            }
+          ]
+        },
+        "batching": {}
+      },
+      "type": "@n8n/n8n-nodes-langchain.chainLlm",
+      "typeVersion": 1.9,
+      "position": [
+        976,
+        416
+      ],
+      "id": "bcfc7583-17f8-425d-90ec-8a31b5d67ec7",
+      "name": "Basic LLM Chain",
+      "retryOnFail": true,
+      "maxTries": 2,
+      "onError": "continueErrorOutput"
+    },
+    {
+      "parameters": {
+        "schemaType": "manual",
+        "inputSchema": "{\n  \"type\": \"object\",\n  \"properties\": {\n    \"answer\": {\n      \"type\": \"string\",\n      \"description\": \"The grounded answer to the user's question, based only on the provided context.\"\n    },\n    \"citations\": {\n      \"type\": \"array\",\n      \"description\": \"Sources actually used to support the answer.\",\n      \"items\": {\n        \"type\": \"object\",\n        \"properties\": {\n          \"file_name\": {\n            \"type\": \"string\"\n          },\n          \"section_title\": {\n            \"type\": \"string\"\n          }\n        },\n        \"required\": [\"file_name\", \"section_title\"]\n      }\n    },\n    \"insufficient_context\": {\n      \"type\": \"boolean\",\n      \"description\": \"True if the provided context did not contain enough information to answer confidently.\"\n    }\n  },\n  \"required\": [\"answer\", \"citations\", \"insufficient_context\"]\n}"
+      },
+      "type": "@n8n/n8n-nodes-langchain.outputParserStructured",
+      "typeVersion": 1.3,
+      "position": [
+        1152,
+        640
+      ],
+      "id": "493f2e32-9809-4413-a779-85068c18f4ef",
+      "name": "Structured Output Parser"
+    },
+    {
+      "parameters": {
+        "jsCode": "/**\n * Workflow 6 — AI Response Generation\n * Node A: Prompt Builder\n *\n * Single Responsibility:\n *   - Build the system prompt and user prompt text that feed into the\n *     native \"Basic LLM Chain\" node (Google Gemini Chat Model + Structured\n *     Output Parser attached).\n *   - This node does NOT call Gemini itself — that happens in the Basic\n *     LLM Chain node immediately downstream. This is the only workflow\n *     permitted to reach an LLM, and it does so via the native node, not\n *     an HTTP call from Code.\n *\n * WIRING NOTE:\n *   In the Basic LLM Chain node, set:\n *     - \"Text\" (user prompt) field to: {{ $json.userPrompt }}\n *     - \"System Message\" (if your n8n version exposes it under Options)\n *       to: {{ $json.systemPrompt }}\n *   If your version of the node doesn't expose a separate System Message\n *   field, prepend systemPrompt to userPrompt manually — a fallback field\n *   `combinedPrompt` is provided below for that case.\n *\n * NO Gemini call happens in this node.\n */\n\nconst items = $input.all();\nconst output = [];\n\n// ---- Configuration ------------------------------------------------------\n\nconst SYSTEM_PROMPT = `You are an internal IT knowledge assistant. Answer the user's question using ONLY the context provided below. Follow these rules strictly:\n\n1. Base your answer entirely on the provided context. Do not use outside knowledge, even if you are confident it is correct.\n2. If the context does not contain enough information to answer, say so explicitly rather than guessing.\n3. Every factual claim in your answer must be traceable to one of the provided source sections. Cite each source you use by its exact file_name and section_title as given in the context — do not invent, paraphrase, or guess at source names.\n4. Do not cite a source you did not actually use to support a specific claim.\n5. Keep the answer concise and directly responsive to the question. Do not repeat the full context verbatim.\n6. Respond ONLY in the structured JSON format defined by the output parser. Do not include any text outside that structure.\n7. Use customer name in greating.\n8. greating must be short and professional.\n9. use company name if not \"Unknown\" when needed`;\n\n// ---- Main -----------------------------------------------------------------\n\nfor (const item of items) {\n  const data = item.json ?? {};\n\n  const contextRequest = data.context_request ?? {};\n  const optimizedContext = data.optimized_context ?? '';\n  const optimizedChunks = Array.isArray(data.optimized_chunks) ? data.optimized_chunks : [];\n  const sourceMap = Array.isArray(data.source_map) ? data.source_map : [];\n  const analytics = data.analytics ?? {};\n  const upstreamStatus = data.status ?? {};\n\n  if (upstreamStatus.status !== 'SUCCESS' || optimizedChunks.length === 0) {\n    output.push({\n      json: {\n        systemPrompt: SYSTEM_PROMPT,\n        userPrompt: '',\n        combinedPrompt: '',\n        query: contextRequest.query ?? null,\n        source_map: sourceMap,\n        optimized_chunks: optimizedChunks,\n        analytics,\n        status: {\n          status: 'FAILURE',\n          reason: upstreamStatus.reason ?? 'No optimized context available to build a prompt from.',\n        },\n      },\n    });\n    continue;\n  }\n\n  // Build the list of valid, citable sources explicitly, so the model has\n  // an unambiguous menu to choose from rather than inferring names from\n  // prose. This directly supports citation validation downstream — any\n  // citation NOT drawn from this exact list is flagged as invalid later.\n  const citableSourcesList = sourceMap\n    .map((s, idx) => `${idx + 1}. file_name: \"${s.file_name}\" | section_title: \"${s.section_title}\"`)\n    .join('\\n');\n\n  const userPrompt = `Question: ${contextRequest.query ?? ''}\n\nContext:\n${optimizedContext}\n\nCitable sources (use these exact file_name and section_title values in your citations, and no others):\n${citableSourcesList}\n\nCustomer Name: ${$json.search_request.customer_name}\n\nCompany Name: ${$json.search_request.company}\n`;\n\n  const combinedPrompt = `${SYSTEM_PROMPT}\\n\\n${userPrompt}`;\n\n  output.push({\n    json: {\n      systemPrompt: SYSTEM_PROMPT,\n      userPrompt,\n      combinedPrompt,\n      query: contextRequest.query ?? null,\n      source_map: sourceMap,\n      optimized_chunks: optimizedChunks,\n      analytics,\n      status: { status: 'SUCCESS', reason: 'Prompt built.' },\n    },\n  });\n}\n\nreturn output;"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        768,
+        336
+      ],
+      "id": "4a292170-26c3-4fb8-a453-d681684d8df2",
+      "name": "Prompt Builder"
+    },
+    {
+      "parameters": {
+        "jsCode": "/**\n * Workflow 6 — AI Response Generation\n * Node B: Citation Validation & Confidence Scoring (post-processing)\n *\n * Single Responsibility:\n *   - Runs AFTER the native Basic LLM Chain node (Gemini + Structured\n *     Output Parser). Takes its parsed JSON output and:\n *       1. Validates every citation against source_map (catches\n *          hallucinated/invented sources — NOT a fact-check of content).\n *       2. Computes confidence from the RETRIEVAL signal already in hand\n *          (top chunk score, tier composition) — no second LLM call,\n *          since self-reported LLM confidence is unreliable and a\n *          verification call would double latency/cost for marginal gain.\n *       3. Assembles the final output: draft answer, validated citations,\n *          confidence, reasoning metadata, token usage, model metadata.\n *\n * WIRING NOTE — VERIFY BEFORE RELYING ON THIS:\n *   The exact field path for the Basic LLM Chain node's parsed output and\n *   token usage varies by n8n/LangChain node version. Common locations:\n *     - Parsed structured output: $json.output  (sometimes $json directly,\n *       or nested under a model-specific key — check your node's actual\n *       output in the execution panel before trusting llmOutput below)\n *     - Token usage: $json.tokenUsage / $json.usage_metadata / absent\n *       entirely on some versions (Gemini nodes don't always surface it)\n *   Adjust the extraction lines marked below to match what you actually see.\n *\n * This is the ONLY workflow permitted to have called Gemini, and that call\n * already happened upstream in the native node — this node does not call\n * any LLM itself.\n */\n\nconst items = $input.all();\nconst output = [];\n\n// ---- Configuration ------------------------------------------------------\n\n// Confidence bands for human-readable labeling alongside the numeric score.\nconst CONFIDENCE_BANDS = [\n  { min: 0.75, label: 'HIGH' },\n  { min: 0.5, label: 'MEDIUM' },\n  { min: 0, label: 'LOW' },\n];\n\n// Multiplier applied to top-chunk score when NO primary-tier chunk was\n// used as evidence — answer is grounded in weaker (background-tier)\n// context, so confidence should reflect that even if the raw score is\n// reasonable in isolation.\nconst NO_PRIMARY_TIER_PENALTY = 0.7;\n\n// ---- Helpers --------------------------------------------------------------\n\nfunction normalizeSourceKey(fileName, sectionTitle) {\n  return `${(fileName ?? '').trim().toLowerCase()}::${(sectionTitle ?? '').trim().toLowerCase()}`;\n}\n\n/**\n * Validates each citation the model returned against the known source_map.\n * A citation is valid only if its (file_name, section_title) pair exactly\n * matches an entry the model was actually given — this catches invented\n * or misattributed sources, not whether the cited claim is itself correct.\n */\nfunction validateCitations(citations, sourceMap) {\n  const validKeys = new Set(\n    sourceMap.map((s) => normalizeSourceKey(s.file_name, s.section_title))\n  );\n\n  const validated = citations.map((citation) => {\n    const key = normalizeSourceKey(citation.file_name, citation.section_title);\n    return {\n      file_name: citation.file_name,\n      section_title: citation.section_title,\n      is_valid: validKeys.has(key),\n    };\n  });\n\n  const invalidCount = validated.filter((c) => !c.is_valid).length;\n  return { validated, invalidCount };\n}\n\n/**\n * Confidence derived entirely from retrieval signal already computed in\n * Workflow 4/5 — no LLM self-report, no second LLM call. Base is the\n * highest final_score among chunks actually selected into context; this\n * is penalized if none of those chunks were primary-tier (i.e. the answer\n * leans on weaker evidence) and if the model itself flagged insufficient\n * context.\n */\nfunction computeConfidence(optimizedChunks, insufficientContext) {\n  if (!optimizedChunks || optimizedChunks.length === 0) {\n    return { score: 0, level: 'LOW', basis: 'No context chunks were available.' };\n  }\n\n  const topScore = Math.max(...optimizedChunks.map((c) => c.final_score ?? 0));\n  const hasPrimaryTier = optimizedChunks.some((c) => c.tier === 'primary');\n\n  let score = topScore;\n  const basisNotes = [`top_chunk_score=${topScore.toFixed(4)}`];\n\n  if (!hasPrimaryTier) {\n    score *= NO_PRIMARY_TIER_PENALTY;\n    basisNotes.push(`no_primary_tier_chunk_used (x${NO_PRIMARY_TIER_PENALTY})`);\n  }\n\n  if (insufficientContext) {\n    score *= 0.5;\n    basisNotes.push('model_flagged_insufficient_context (x0.5)');\n  }\n\n  score = Math.min(1, Math.max(0, score));\n  const level = CONFIDENCE_BANDS.find((band) => score >= band.min).label;\n\n  return { score: Number(score.toFixed(4)), level, basis: basisNotes.join('; ') };\n}\n\n// ---- Main -------------------------------------------------------------\n\nfor (const item of items) {\n  const data = item.json ?? {};\n\n  // --- ADJUST HERE if your Basic LLM Chain node's output field differs ---\n  const llmOutput = data.output ?? data;\n  // -------------------------------------------------------------------\n\n  const sourceMap = Array.isArray(data.source_map) ? data.source_map : [];\n  const analytics = data.analytics ?? {};\n  const optimizedChunksFromUpstream = Array.isArray(data.optimized_chunks) ? data.optimized_chunks : [];\n\n  const answer = llmOutput?.answer;\n  const rawCitations = Array.isArray(llmOutput?.citations) ? llmOutput.citations : [];\n  const insufficientContext = llmOutput?.insufficient_context === true;\n\n  if (!answer) {\n    output.push({\n      json: {\n        draft_answer: null,\n        citations: [],\n        confidence: { score: 0, level: 'LOW', basis: 'No answer returned by model.' },\n        reasoning_metadata: { insufficient_context: true, citation_validation: null },\n        token_usage: data.analytics.token_estimate ?? data.usage_metadata ?? null,\n        model_metadata: { model: data.model ?? 'gemini', source: 'Basic LLM Chain' },\n        status: { status: 'FAILURE', reason: 'Model did not return a parsable answer.' },\n      },\n    });\n    continue;\n  }\n\n  const { validated, invalidCount } = validateCitations(rawCitations, sourceMap);\n  const confidence = computeConfidence(optimizedChunksFromUpstream, insufficientContext);\n\n  output.push({\n    json: {\n      draft_answer: answer,\n      citations: validated,\n      source_map:data.source_map,\n      confidence,\n      reasoning_metadata: {\n        insufficient_context: insufficientContext,\n        citation_validation: {\n          total_citations: validated.length,\n          invalid_citations: invalidCount,\n        },\n      },\n      // --- ADJUST HERE if token usage lives at a different path ---\n      token_usage: data.analytics.token_estimate  ?? data.usage_metadata ?? null,\n      model_metadata: {\n        model: data.model ?? 'gemini',\n        source: 'Basic LLM Chain',\n      },\n      status: { status: 'SUCCESS', reason: 'Response validated and confidence scored.' },\n    },\n  });\n}\n\nreturn output;"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1584,
+        352
+      ],
+      "id": "8d3872a1-36fc-4174-9cda-2e2bd4212f6c",
+      "name": "Citation Validation & Confidence Scoring (post-processing)"
+    },
+    {
+      "parameters": {
+        "mode": "combine",
+        "combineBy": "combineByPosition",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.merge",
+      "typeVersion": 3.2,
+      "position": [
+        1344,
+        352
+      ],
+      "id": "f20d54a1-afde-43ca-8715-182b94af60b9",
+      "name": "Merge1"
+    },
+    {
+      "parameters": {
+        "content": "Workflow 2.3 Prompt Building, AI Response Generation, and Citation Validation",
+        "height": 640,
+        "width": 1104,
+        "color": 6
+      },
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        672,
+        144
+      ],
+      "id": "bf7d3232-c645-4125-a468-f6e9cfbbfc4b",
+      "name": "Sticky Note3"
+    },
+    {
+      "parameters": {
+        "jsCode": "/**\n * Workflow 7 — Response Formatting\n *\n * Single Responsibility:\n *   - Convert Workflow 6's raw AI response payload into the final shape\n *     the client (Support Agent UI, chat widget, etc.) actually consumes.\n *   - NO AI calls, NO prompt building — purely presentational reshaping.\n *\n * Responsibilities per architecture spec:\n *   - Answer\n *   - Sources\n *   - Confidence\n *   - Related documents\n *   - Suggested follow-up questions\n *\n * DESIGN NOTE — \"Suggested follow-up questions\":\n *   Generating genuinely useful follow-up questions well usually needs an\n *   LLM call, which this workflow is explicitly forbidden from making.\n *   Rather than fabricate a fake \"smart\" feature, this node derives\n *   follow-ups deterministically from the OTHER documents that were\n *   retrieved but not cited (e.g. if the VPN guide was retrieved but not\n *   used in the answer, suggest a follow-up about VPN access). This is a\n *   simple, honest heuristic — not a substitute for an LLM-generated\n *   suggestion — and is skipped entirely if there's nothing to derive it\n *   from, rather than inventing generic filler questions.\n */\n\nconst items = $input.all();\nconst output = [];\n\n// ---- Configuration ------------------------------------------------------\n\nconst MAX_RELATED_DOCUMENTS = 3;\nconst MAX_FOLLOWUP_QUESTIONS = 3;\n\n// ---- Helpers --------------------------------------------------------------\n\n/**\n * Builds a plain-language follow-up question from a document's section\n * title. Deliberately simple templating, not NLP — this is a fallback\n * heuristic, not a generated suggestion.\n */\nfunction toFollowUpQuestion(sectionTitle, fileName) {\n  const label = sectionTitle || fileName || 'this topic';\n  return `Would you like more information about \"${label}\"?`;\n}\n\n/**\n * Related documents: distinct source documents from source_map that were\n * retrieved as context but were NOT among the validated citations actually\n * used in the answer. This surfaces adjacent, possibly-useful material\n * without claiming the model recommended it.\n */\nfunction deriveRelatedDocuments(sourceMap, citedFileNames) {\n  const seen = new Set();\n  const related = [];\n\n  for (const source of sourceMap) {\n    const key = source.document_uuid;\n    if (!key || seen.has(key) || citedFileNames.has(key)) continue;\n    seen.add(key);\n    related.push({\n      file_name: source.file_name,\n      section_title: source.section_title,\n    });\n    if (related.length >= MAX_RELATED_DOCUMENTS) break;\n  }\n\n  return related;\n}\n\n// ---- Main -------------------------------------------------------------\n\nfor (const item of items) {\n  const data = item.json ?? {};\n\n  const draftAnswer = data.draft_answer;\n  const citations = Array.isArray(data.citations) ? data.citations : [];\n  const confidence = data.confidence ?? { score: 0, level: 'LOW', basis: 'Unknown.' };\n  const upstreamStatus = data.status ?? {};\n\n  if (upstreamStatus.status !== 'SUCCESS' || !draftAnswer) {\n    output.push({\n      json: {\n        answer: null,\n        sources: [],\n        confidence: { level: 'LOW', score: 0 },\n        related_documents: [],\n        suggested_followups: [],\n        status: {\n          status: 'FAILURE',\n          reason: upstreamStatus.reason ?? 'No answer available to format.',\n        },\n      },\n    });\n    continue;\n  }\n\n  // Sources shown to the user: only VALID citations. Invalid/hallucinated\n  // citations caught in Workflow 6 are never surfaced to the client.\n  const validCitations = citations.filter((c) => c.is_valid !== false);\n  const noUsefulAnswer = confidence.score === 0 || validCitations.length === 0;\n  const sources = validCitations.map((c) => ({\n    file_name: c.file_name,\n    section_title: c.section_title,\n  }));\n\n  const citedFileNames = new Set(sources.map((s) => s.file_name));\n\n  // source_map (full retrieved set) may not be present on this node's\n  // input depending on what Workflow 6 passes through — guard accordingly.\n  const sourceMap = Array.isArray(data.source_map) ? data.source_map : [];\n  /**\n   \nconst relatedDocuments = deriveRelatedDocuments(sourceMap, citedFileNames);\n\n  const suggestedFollowups = relatedDocuments\n    .slice(0, MAX_FOLLOWUP_QUESTIONS)\n    .map((doc) => toFollowUpQuestion(doc.section_title, doc.file_name));\n**/\n const relatedDocuments = noUsefulAnswer ? [] : deriveRelatedDocuments(sourceMap, citedFileNames);\n  const suggestedFollowups = noUsefulAnswer ? [] : relatedDocuments.slice(0, MAX_FOLLOWUP_QUESTIONS).map((doc) => toFollowUpQuestion(doc.section_title, doc.file_name));   \n \n  output.push({\n    json: {\n      answer: draftAnswer,\n      sources,\n      confidence: { level: confidence.level, score: confidence.score },\n      related_documents: relatedDocuments,\n      suggested_followups: suggestedFollowups,\n      status: { status: 'SUCCESS', reason: 'Response formatted for client delivery.' },\n    },\n  });\n}\n\nreturn output;"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1872,
+        352
+      ],
+      "id": "a3092078-5b90-444a-883d-1f7781e94747",
+      "name": "Response Formatting"
+    },
+    {
+      "parameters": {
+        "content": "Workflow 2.4 Response Formatting",
+        "height": 640,
+        "width": 336,
+        "color": 3
+      },
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        1776,
+        144
+      ],
+      "id": "e8b3aaef-e13d-45b2-bf9d-dce5419d52a4",
+      "name": "Sticky Note4"
+    },
+    {
+      "parameters": {
+        "jsCode": "/**\n * Workflow 8 — Logging & Analytics\n *\n * Single Responsibility:\n *   - Aggregate a complete audit record for this query across every stage\n *     of the pipeline (Workflows 3-7) into one flat log entry, ready to be\n *     written to a persistence layer (Postgres/Mongo/Sheets/HTTP — attach\n *     whichever storage node your infra uses AFTER this Code node; this\n *     node only ASSEMBLES the record, it does not store it).\n *\n * CRITICAL WIRING NOTE — same cross-node data loss as Workflow 6 Node B:\n *   By this point in the chain, several nodes (the Basic LLM Chain node\n *   especially) have already replaced the item JSON and dropped fields\n *   from earlier stages. This node does NOT rely on $json for most of its\n *   data — it pulls directly from each stage BY NAME using $('Node Name').\n *   You MUST update the *_NODE_NAME constants below to match the EXACT\n *   node titles as they appear in your n8n canvas (case and spacing must\n *   match exactly, or $() will throw a reference error at runtime).\n *\n * WHAT THIS NODE DOES NOT DO:\n *   - Does not store the record anywhere. Attach a storage node after this\n *     one (Postgres, MongoDB, Google Sheets, or an HTTP Request to your\n *     own logging API all work — pick based on your existing infra).\n *   - Does not capture user_feedback. Feedback (thumbs up/down, corrections)\n *     arrives asynchronously, typically via a separate webhook after the\n *     response is shown to the user. That workflow should UPDATE this\n *     same log record by request_id, not create a new one — out of scope\n *     for this node, which only handles the initial write.\n *   - Does not compute real dollar cost unless token_usage is actually\n *     populated. Given Workflow 6 currently reports token_usage as null\n *     (the Basic LLM Chain node in your version doesn't surface it),\n *     estimated_cost_usd will be null until that's resolved — this node\n *     does not fabricate a cost from an absent token count.\n */\n\n// ---- Configuration — UPDATE THESE to match your actual node titles ------\n\nconst QUERY_PROCESSING_NODE_NAME = 'When Executed by Another Workflow'; // Workflow 3 output node\nconst RETRIEVAL_VALIDATION_NODE_NAME = 'Retrieval Validation & Metadata Filtering'; // Workflow 4 Node 1\nconst RANKING_NODE_NAME = 'Composite Ranking & Diversity Engine'; // Workflow 4 Node 2\nconst PROMPT_BUILDER_NODE_NAME = 'Prompt Builder'; // Workflow 6 Node A\nconst CITATION_VALIDATION_NODE_NAME = 'Citation Validation & Confidence Scoring (post-processing)'; // Workflow 6 Node B\n\n// Rough per-1K-token USD rates, used ONLY if token_usage is ever populated.\n// These are placeholders — verify against Gemini's actual current pricing\n// before trusting estimated_cost_usd for anything beyond rough tracking.\nconst COST_PER_1K_TOKENS_USD = { prompt: 0.0, completion: 0.0 };\n\n// ---- Helpers --------------------------------------------------------------\n\n/**\n * Safely reads a named node's first item JSON, returning {} if the node\n * doesn't exist in this execution (e.g. an earlier branch failed and this\n * node never ran) rather than throwing and killing the whole log write.\n */\nfunction safeNodeData(nodeName) {\n  try {\n    return $(nodeName).item.json ?? {};\n  } catch (err) {\n    return {};\n  }\n}\n\n/**\n * Normalizes token_usage into a consistent shape regardless of what the\n * Basic LLM Chain node actually returned. Observed in practice: it\n * sometimes returns a single number (total tokens only), not the\n * {prompt_tokens, completion_tokens} object originally assumed.\n */\nfunction normalizeTokenUsage(tokenUsage) {\n  if (tokenUsage == null) {\n    return { prompt_tokens: null, completion_tokens: null, total_tokens: null };\n  }\n  if (typeof tokenUsage === 'number') {\n    return { prompt_tokens: null, completion_tokens: null, total_tokens: tokenUsage };\n  }\n  if (typeof tokenUsage === 'object') {\n    const promptTokens = tokenUsage.prompt_tokens ?? tokenUsage.promptTokens ?? null;\n    const completionTokens = tokenUsage.completion_tokens ?? tokenUsage.completionTokens ?? null;\n    const totalTokens =\n      tokenUsage.total_tokens ??\n      tokenUsage.totalTokens ??\n      (promptTokens != null || completionTokens != null\n        ? (promptTokens ?? 0) + (completionTokens ?? 0)\n        : null);\n    return { prompt_tokens: promptTokens, completion_tokens: completionTokens, total_tokens: totalTokens };\n  }\n  return { prompt_tokens: null, completion_tokens: null, total_tokens: null };\n}\n\nfunction estimateCost(normalizedTokenUsage) {\n  if (!normalizedTokenUsage) return null;\n  const { prompt_tokens, completion_tokens, total_tokens } = normalizedTokenUsage;\n\n  if (prompt_tokens != null || completion_tokens != null) {\n    const promptCost = ((prompt_tokens ?? 0) / 1000) * COST_PER_1K_TOKENS_USD.prompt;\n    const completionCost = ((completion_tokens ?? 0) / 1000) * COST_PER_1K_TOKENS_USD.completion;\n    return Number((promptCost + completionCost).toFixed(6));\n  }\n  if (total_tokens != null) {\n    const blendedRate = (COST_PER_1K_TOKENS_USD.prompt + COST_PER_1K_TOKENS_USD.completion) / 2;\n    return Number(((total_tokens / 1000) * blendedRate).toFixed(6));\n  }\n  return null;\n}\n\nfunction computeLatencyMs(receivedAtIso) {\n  if (!receivedAtIso) return null;\n  const start = Date.parse(receivedAtIso);\n  if (Number.isNaN(start)) return null;\n  return Date.now() - start;\n}\n\n/**\n * Collects every non-SUCCESS status encountered across stages, so a\n * partial-failure query (e.g. ranking succeeded but citation validation\n * failed) is logged with full context, not just the final node's status.\n */\nfunction collectErrors(stages) {\n  const errors = [];\n  for (const [stageName, stageData] of Object.entries(stages)) {\n    const status = stageData?.status;\n    if (status && status.status && status.status !== 'SUCCESS') {\n      errors.push({ stage: stageName, status: status.status, reason: status.reason ?? null });\n    }\n  }\n  return errors;\n}\n\n// ---- Main -----------------------------------------------------------------\n\nconst items = $input.all();\nconst output = [];\n\nfor (const item of items) {\n  const currentData = item.json ?? {}; // Workflow 7's formatted output (final node before this)\n\n  const queryStage = safeNodeData(QUERY_PROCESSING_NODE_NAME);\n  const retrievalStage = safeNodeData(RETRIEVAL_VALIDATION_NODE_NAME);\n  const rankingStage = safeNodeData(RANKING_NODE_NAME);\n  const promptStage = safeNodeData(PROMPT_BUILDER_NODE_NAME);\n  const citationStage = safeNodeData(CITATION_VALIDATION_NODE_NAME);\n\n  const searchRequest = queryStage.search_request ?? {};\n  const requestMetadata = queryStage.request_metadata ?? {};\n\n  const retrievedChunks = Array.isArray(retrievalStage.validated_chunks)\n    ? retrievalStage.validated_chunks.map((c) => ({ chunk_uuid: c.chunk_uuid, file_name: c.file_name, score: c.score }))\n    : [];\n\n  const selectedChunks = Array.isArray(promptStage.optimized_chunks)\n    ? promptStage.optimized_chunks.map((c) => ({\n        document_uuid: c.document_uuid,\n        file_name: c.file_name,\n        tier: c.tier,\n        final_score: c.final_score,\n      }))\n    : [];\n\n  const tokenUsage = normalizeTokenUsage(citationStage.token_usage ?? null);\n  const latencyMs = computeLatencyMs(searchRequest.received_at);\n\n  const errors = collectErrors({\n    query_processing: queryStage,\n    retrieval_validation: retrievalStage,\n    ranking: rankingStage,\n    citation_validation: citationStage,\n    response_formatting: currentData,\n  });\n\n  output.push({\n    json: {\n      request_id: requestMetadata.request_id ?? null,\n      session_id: searchRequest.conversation_id ?? null, // no distinct session_id field exists upstream yet\n      conversation_id: searchRequest.conversation_id ?? null,\n      user_id: searchRequest.user_id ?? null,\n      query: searchRequest.normalized_query ?? searchRequest.query ?? null,\n      embedding_model: requestMetadata.embedding_model ?? null,\n      retrieved_chunks: retrievedChunks,\n      selected_chunks: selectedChunks,\n      prompt_tokens: tokenUsage.prompt_tokens,\ncompletion_tokens: tokenUsage.completion_tokens,\ntotal_tokens: tokenUsage.total_tokens,\ncost_is_estimated_from_total_only: tokenUsage.prompt_tokens == null && tokenUsage.total_tokens != null,\nestimated_cost_usd: estimateCost(tokenUsage),\n      latency_ms: latencyMs,\n      user_feedback: null, // populated later by a separate feedback-update workflow, not this node\n      errors,\n      logged_at: new Date().toISOString(),\n    },\n  });\n}\n\nreturn output;"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2272,
+        576
+      ],
+      "id": "92da5c1c-38a1-4af3-be43-2aa4d32aeee4",
+      "name": "Logging & Analytics"
+    },
+    {
+      "parameters": {
+        "mode": "combine",
+        "combineBy": "combineByPosition",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.merge",
+      "typeVersion": 3.2,
+      "position": [
+        2432,
+        256
+      ],
+      "id": "a6f5dd31-2d07-408b-b9ff-0f2d98ffb481",
+      "name": "Merge2"
+    },
+    {
+      "parameters": {
+        "includeOtherFields": true,
+        "options": {}
+      },
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        2640,
+        256
+      ],
+      "id": "a29a6d7f-0ede-42e4-8168-fb1f6e2c1672",
+      "name": "Edit Fields1"
+    },
+    {
+      "parameters": {
+        "errorMessage": "Error in Basic LLM Chain in Context Optimization Engine Workflow"
+      },
+      "type": "n8n-nodes-base.stopAndError",
+      "typeVersion": 1,
+      "position": [
+        1328,
+        512
+      ],
+      "id": "9c31f884-58da-4114-9de9-8682757ed24a",
+      "name": "Stop and Error"
+    },
+    {
+      "parameters": {
+        "modelName": "models/gemini-2.5-flash",
+        "options": {}
+      },
+      "type": "@n8n/n8n-nodes-langchain.lmChatGoogleGemini",
+      "typeVersion": 1.1,
+      "position": [
+        720,
+        640
+      ],
+      "id": "3a351635-ee93-4eed-8189-0f6ec11891d4",
+      "name": "models/gemini-2.5-flash1",
+      "credentials": {
+        "googlePalmApi": {
+          "id": "thnOcnvjIC2zdqMH",
+          "name": "Google Gemini(PaLM) Api account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "options": {}
+      },
+      "type": "@n8n/n8n-nodes-langchain.lmChatGoogleGemini",
+      "typeVersion": 1.1,
+      "position": [
+        944,
+        640
+      ],
+      "id": "a5a76348-34c9-4539-845f-66bf7a11182a",
+      "name": "models/gemini-3-flash-preview",
+      "credentials": {
+        "googlePalmApi": {
+          "id": "thnOcnvjIC2zdqMH",
+          "name": "Google Gemini(PaLM) Api account"
+        }
+      }
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "When Executed by Another Workflow": {
+      "main": [
+        [
+          {
+            "node": "Retrieval Validation & Metadata Filtering",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Retrieval Validation & Metadata Filtering": {
+      "main": [
+        [
+          {
+            "node": "Composite Ranking & Diversity Engine",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Composite Ranking & Diversity Engine": {
+      "main": [
+        [
+          {
+            "node": "Query Complexity Classification & Budget Allocation",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Query Complexity Classification & Budget Allocation": {
+      "main": [
+        [
+          {
+            "node": "Dedup, Merge, Compress, Budget Enforcement & Ordering",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Dedup, Merge, Compress, Budget Enforcement & Ordering": {
+      "main": [
+        [
+          {
+            "node": "Prompt Builder",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Structured Output Parser": {
+      "ai_outputParser": [
+        [
+          {
+            "node": "Basic LLM Chain",
+            "type": "ai_outputParser",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prompt Builder": {
+      "main": [
+        [
+          {
+            "node": "Basic LLM Chain",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Merge1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Basic LLM Chain": {
+      "main": [
+        [
+          {
+            "node": "Merge1",
+            "type": "main",
+            "index": 1
+          }
+        ],
+        [
+          {
+            "node": "Stop and Error",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Merge1": {
+      "main": [
+        [
+          {
+            "node": "Citation Validation & Confidence Scoring (post-processing)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Citation Validation & Confidence Scoring (post-processing)": {
+      "main": [
+        [
+          {
+            "node": "Response Formatting",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Response Formatting": {
+      "main": [
+        [
+          {
+            "node": "Merge2",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Logging & Analytics",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Logging & Analytics": {
+      "main": [
+        [
+          {
+            "node": "Merge2",
+            "type": "main",
+            "index": 1
+          }
+        ]
+      ]
+    },
+    "Merge2": {
+      "main": [
+        [
+          {
+            "node": "Edit Fields1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "models/gemini-2.5-flash1": {
+      "ai_languageModel": [
+        [
+          {
+            "node": "Basic LLM Chain",
+            "type": "ai_languageModel",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "models/gemini-3-flash-preview": {
+      "ai_languageModel": [
+        [
+          {
+            "node": "Basic LLM Chain",
+            "type": "ai_languageModel",
+            "index": 1
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate",
+    "availableInMCP": false
+  },
+  "versionId": "952fd373-dc45-4cd2-b859-e04bcaee154a",
+  "meta": {
+    "templateCredsSetupCompleted": true,
+    "instanceId": "22a94396d635bdc18c036410c0b06da7851292b894f2255bca52f69454134ddc"
+  },
+  "nodeGroups": [],
+  "id": "21Nl53i7mj8lNvYJ",
+  "tags": []
+}

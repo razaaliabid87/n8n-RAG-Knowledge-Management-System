@@ -1,0 +1,977 @@
+{
+  "name": "1 - Knowledge Intake",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "9346f3fb-c0c8-4270-8eb0-b99b0a85d42f",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2.1,
+      "position": [
+        -240,
+        -48
+      ],
+      "id": "75886b74-6a94-45e9-bdde-8490ee73f72b",
+      "name": "Webhook",
+      "webhookId": "9346f3fb-c0c8-4270-8eb0-b99b0a85d42f"
+    },
+    {
+      "parameters": {
+        "jsCode": "// ===============================\n// Enterprise Knowledge Platform\n// Workflow 1 - Validate Request\n// Multi File Version\n// ===============================\n\nconst ALLOWED_EXTENSIONS = [\n  \"pdf\",\n  \"docx\",\n  \"doc\",\n  \"txt\",\n  \"md\",\n  \"html\"\n];\n\nconst MAX_FILE_SIZE = 50 * 1024 * 1024; // 50 MB\n\nconst item = $input.item;\n\n//--------------------------------------------------\n// Validate Binary Exists\n//--------------------------------------------------\n\nif (!item.binary || Object.keys(item.binary).length === 0) {\n    throw new Error(\"No document was uploaded.\");\n}\n\n//--------------------------------------------------\n// Validate Metadata\n//--------------------------------------------------\n\nconst body = item.json.body || {};\n\nconst department = body.Department;\nconst category = body.Category;\nconst version = body.Version;\nconst source = body.Source;\n\nif (!department) throw new Error(\"Department is required.\");\nif (!category) throw new Error(\"Category is required.\");\nif (!version) throw new Error(\"Version is required.\");\nif (!source) throw new Error(\"Source is required.\");\n\n//--------------------------------------------------\n// Validate Every Uploaded File\n//--------------------------------------------------\n\nconst binaryKeys = Object.keys(item.binary);\n\nfor (const key of binaryKeys) {\n\n    const file = item.binary[key];\n\n    if (!file.fileName) {\n        throw new Error(`${key}: Missing filename.`);\n    }\n\n    const extension = file.fileName\n        .split(\".\")\n        .pop()\n        .toLowerCase();\n\n    if (!ALLOWED_EXTENSIONS.includes(extension)) {\n        throw new Error(\n            `${file.fileName}: Unsupported file type (.${extension})`\n        );\n    }\n\n    const size = Number(file.fileSize || 0);\n\n    if (size <= 0) {\n        throw new Error(`${file.fileName}: Invalid file size.`);\n    }\n\n    if (size > MAX_FILE_SIZE) {\n        throw new Error(\n            `${file.fileName}: File exceeds 50 MB limit.`\n        );\n    }\n}\n\n//--------------------------------------------------\n// Success\n//--------------------------------------------------\n\nreturn [{\n    json: {\n        ...item.json,\n        total_files: binaryKeys.length,\n        validation_status: \"Passed\"\n    },\n    binary: item.binary\n}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -32,
+        -48
+      ],
+      "id": "bff5ff67-c99b-41e6-b2f0-b3e6c2782a2c",
+      "name": "Validate Request"
+    },
+    {
+      "parameters": {
+        "jsCode": "// ===============================================\n// Enterprise Knowledge Management Platform\n// Workflow 1 - Generate Document Metadata\n// ===============================================\n\nfunction generateUUID() {\n    return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, function(c) {\n        const r = Math.random() * 16 | 0;\n        const v = c === 'x' ? r : (r & 0x3 | 0x8);\n        return v.toString(16);\n    });\n}\n\nconst inputItem = $input.item;\n\nconst body = inputItem.json.body || {};\nconst binaries = inputItem.binary || {};\n\nconst output = [];\n\nfor (const binaryKey of Object.keys(binaries)) {\n\n    const file = binaries[binaryKey];\n\n    // ---------- File Information ----------\n\n    const fileName = file.fileName || \"\";\n    const extension = fileName.includes(\".\")\n        ? fileName.split(\".\").pop().toLowerCase()\n        : \"\";\n\n    const mimeType = file.mimeType || \"\";\n    const fileSize = file.bytes ?? 0;\n\n    // ---------- Generate UUID (Unique Per Document) ----------\n\n    const documentUUID = generateUUID();\n\n    // ---------- Build Output Item ----------\n\n    output.push({\n\n        json: {\n\n            // Document Identity\n            document_uuid: documentUUID,\n\n            // User Metadata\n            department: body.Department,\n            category: body.Category,\n            version: body.Version,\n            source: body.Source,\n\n            // File Metadata\n            file_name: fileName,\n            file_extension: extension,\n            mime_type: mimeType,\n            file_size: fileSize,\n\n            // Processing Metadata\n            processing_status: \"Uploaded\",\n            processing_stage: \"Intake\",\n            collection_name: \"knowledge_base\",\n\n            workflow_version: \"1.0\",\n\n            received_at: new Date().toISOString()\n\n        },\n\n        binary: {\n            file\n        }\n\n    });\n\n}\n\nreturn output;"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        176,
+        -48
+      ],
+      "id": "4b7822d7-9a7a-468d-85d8-0911ef9b57a5",
+      "name": "Generate Document Metadata"
+    },
+    {
+      "parameters": {
+        "operation": "write",
+        "fileName": "=/knowledge/fileStorage/{{$json.department}}/{{$json.file_name}}",
+        "dataPropertyName": "file",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.readWriteFile",
+      "typeVersion": 1.1,
+      "position": [
+        400,
+        -48
+      ],
+      "id": "ebae41d3-5747-461e-bf63-d9553745a3a4",
+      "name": "Read/Write Files from Disk"
+    },
+    {
+      "parameters": {
+        "operation": "create",
+        "base": {
+          "__rl": true,
+          "value": "appRAMRezVA0zjwWA",
+          "mode": "list",
+          "cachedResultName": "Enterprise Knowledge Management Platform",
+          "cachedResultUrl": "https://airtable.com/appRAMRezVA0zjwWA"
+        },
+        "table": {
+          "__rl": true,
+          "value": "tblKoY1HC2cewE0xG",
+          "mode": "list",
+          "cachedResultName": "Documents",
+          "cachedResultUrl": "https://airtable.com/appRAMRezVA0zjwWA/tblKoY1HC2cewE0xG"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "File Name": "={{ $json.file_name }}",
+            "Display Name": "={{ $json.file_name }}",
+            "File Size (Bytes)": "={{ $json.file_size }}",
+            "File Extension": "={{ $json.file_extension.toUpperCase() }}",
+            "MIME Type": "={{ $json.mime_type }}",
+            "Source": "={{ $json.source }}",
+            "Category": "={{ $json.category }}",
+            "Version": "={{ $json.version }}",
+            "Department": "={{ $json.department }}",
+            "Status": "Uploaded",
+            "Collection Name": "={{ $json.collection_name }}",
+            "Storage Path": "={{ $json.fileName }}",
+            "Processing Stage": "Intake",
+            "Total Chunks": 0,
+            "Indexed Chunks": 0,
+            "Processing Progress (%)": 0,
+            "Document UUID Created in n8n": "={{ $json.document_uuid }}"
+          },
+          "matchingColumns": [],
+          "schema": [
+            {
+              "id": "Document ID",
+              "displayName": "Document ID",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "string",
+              "readOnly": true,
+              "removed": true
+            },
+            {
+              "id": "File Name",
+              "displayName": "File Name",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "Display Name",
+              "displayName": "Display Name",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "File Extension",
+              "displayName": "File Extension",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "options",
+              "options": [
+                {
+                  "name": "PDF",
+                  "value": "PDF"
+                },
+                {
+                  "name": "DOCX",
+                  "value": "DOCX"
+                },
+                {
+                  "name": "DOC",
+                  "value": "DOC"
+                },
+                {
+                  "name": "TXT",
+                  "value": "TXT"
+                },
+                {
+                  "name": "MD",
+                  "value": "MD"
+                },
+                {
+                  "name": "HTML",
+                  "value": "HTML"
+                },
+                {
+                  "name": "CSV",
+                  "value": "CSV"
+                },
+                {
+                  "name": "PPTX",
+                  "value": "PPTX"
+                },
+                {
+                  "name": "JSON",
+                  "value": "JSON"
+                },
+                {
+                  "name": "XML",
+                  "value": "XML"
+                },
+                {
+                  "name": "Other",
+                  "value": "Other"
+                }
+              ],
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "MIME Type",
+              "displayName": "MIME Type",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "Source",
+              "displayName": "Source",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "options",
+              "options": [
+                {
+                  "name": "Manual Upload",
+                  "value": "Manual Upload"
+                },
+                {
+                  "name": "Local Folder",
+                  "value": "Local Folder"
+                },
+                {
+                  "name": "Google Drive",
+                  "value": "Google Drive"
+                },
+                {
+                  "name": "OneDrive",
+                  "value": "OneDrive"
+                },
+                {
+                  "name": "SharePoint",
+                  "value": "SharePoint"
+                },
+                {
+                  "name": "Notion",
+                  "value": "Notion"
+                },
+                {
+                  "name": "Confluence",
+                  "value": "Confluence"
+                },
+                {
+                  "name": "API",
+                  "value": "API"
+                },
+                {
+                  "name": "Website",
+                  "value": "Website"
+                },
+                {
+                  "name": "Email",
+                  "value": "Email"
+                },
+                {
+                  "name": "Other",
+                  "value": "Other"
+                },
+                {
+                  "name": "Webhook",
+                  "value": "Webhook"
+                }
+              ],
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "Department",
+              "displayName": "Department",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "options",
+              "options": [
+                {
+                  "name": "HR",
+                  "value": "HR"
+                },
+                {
+                  "name": "IT",
+                  "value": "IT"
+                },
+                {
+                  "name": "Sales",
+                  "value": "Sales"
+                },
+                {
+                  "name": "Finance",
+                  "value": "Finance"
+                },
+                {
+                  "name": "Marketing",
+                  "value": "Marketing"
+                },
+                {
+                  "name": "Legal",
+                  "value": "Legal"
+                },
+                {
+                  "name": "Operations",
+                  "value": "Operations"
+                },
+                {
+                  "name": "Customer Support",
+                  "value": "Customer Support"
+                },
+                {
+                  "name": "Engineering",
+                  "value": "Engineering"
+                },
+                {
+                  "name": "General",
+                  "value": "General"
+                },
+                {
+                  "name": "Other",
+                  "value": "Other"
+                }
+              ],
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "Category",
+              "displayName": "Category",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "options",
+              "options": [
+                {
+                  "name": "Policy",
+                  "value": "Policy"
+                },
+                {
+                  "name": "SOP",
+                  "value": "SOP"
+                },
+                {
+                  "name": "Manual",
+                  "value": "Manual"
+                },
+                {
+                  "name": "FAQ",
+                  "value": "FAQ"
+                },
+                {
+                  "name": "Knowledge Base",
+                  "value": "Knowledge Base"
+                },
+                {
+                  "name": "Technical Documentation",
+                  "value": "Technical Documentation"
+                },
+                {
+                  "name": "Product Documentation",
+                  "value": "Product Documentation"
+                },
+                {
+                  "name": "Contract",
+                  "value": "Contract"
+                },
+                {
+                  "name": "Training Material",
+                  "value": "Training Material"
+                },
+                {
+                  "name": "Process Document",
+                  "value": "Process Document"
+                },
+                {
+                  "name": "Other",
+                  "value": "Other"
+                }
+              ],
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "Version",
+              "displayName": "Version",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "Language",
+              "displayName": "Language",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "options",
+              "options": [
+                {
+                  "name": "English",
+                  "value": "English"
+                },
+                {
+                  "name": "Urdu",
+                  "value": "Urdu"
+                },
+                {
+                  "name": "Arabic",
+                  "value": "Arabic"
+                },
+                {
+                  "name": "Other",
+                  "value": "Other"
+                }
+              ],
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "File Size (Bytes)",
+              "displayName": "File Size (Bytes)",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "number",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "Status",
+              "displayName": "Status",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "options",
+              "options": [
+                {
+                  "name": "Uploaded",
+                  "value": "Uploaded"
+                },
+                {
+                  "name": "Queued",
+                  "value": "Queued"
+                },
+                {
+                  "name": "Processing",
+                  "value": "Processing"
+                },
+                {
+                  "name": "Indexed",
+                  "value": "Indexed"
+                },
+                {
+                  "name": "Failed",
+                  "value": "Failed"
+                },
+                {
+                  "name": "Archived",
+                  "value": "Archived"
+                },
+                {
+                  "name": "Deleted",
+                  "value": "Deleted"
+                }
+              ],
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "Processing Stage",
+              "displayName": "Processing Stage",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "options",
+              "options": [
+                {
+                  "name": "Intake",
+                  "value": "Intake"
+                },
+                {
+                  "name": "Text Extraction",
+                  "value": "Text Extraction"
+                },
+                {
+                  "name": "Cleaning",
+                  "value": "Cleaning"
+                },
+                {
+                  "name": "Chunking",
+                  "value": "Chunking"
+                },
+                {
+                  "name": "Embedding",
+                  "value": "Embedding"
+                },
+                {
+                  "name": "Vector Storage",
+                  "value": "Vector Storage"
+                },
+                {
+                  "name": "Completed",
+                  "value": "Completed"
+                },
+                {
+                  "name": "Failed",
+                  "value": "Failed"
+                },
+                {
+                  "name": "Hashing",
+                  "value": "Hashing"
+                },
+                {
+                  "name": "Duplicate Detection",
+                  "value": "Duplicate Detection"
+                }
+              ],
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "Collection Name",
+              "displayName": "Collection Name",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "Embedding Model",
+              "displayName": "Embedding Model",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "Total Chunks",
+              "displayName": "Total Chunks",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "number",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "Indexed Chunks",
+              "displayName": "Indexed Chunks",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "number",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "Processing Progress (%)",
+              "displayName": "Processing Progress (%)",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "number",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "Document Hash",
+              "displayName": "Document Hash",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "Last Error",
+              "displayName": "Last Error",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "File URL",
+              "displayName": "File URL",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "Uploaded By",
+              "displayName": "Uploaded By",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "Uploaded At",
+              "displayName": "Uploaded At",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "string",
+              "readOnly": true,
+              "removed": true
+            },
+            {
+              "id": "Last Indexed At",
+              "displayName": "Last Indexed At",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "dateTime",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "Last Updated At",
+              "displayName": "Last Updated At",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "string",
+              "readOnly": true,
+              "removed": true
+            },
+            {
+              "id": "Notes",
+              "displayName": "Notes",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "Storage Path",
+              "displayName": "Storage Path",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "Document UUID Created in n8n",
+              "displayName": "Document UUID Created in n8n",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.airtable",
+      "typeVersion": 2.2,
+      "position": [
+        576,
+        96
+      ],
+      "id": "57713f14-1185-49a8-aeb1-68594b7f4977",
+      "name": "Create a record",
+      "retryOnFail": true,
+      "maxTries": 2,
+      "credentials": {
+        "airtableTokenApi": {
+          "id": "JakJ5QqnRCltt6YG",
+          "name": "Airtable Personal Access Token account"
+        }
+      },
+      "onError": "continueErrorOutput"
+    },
+    {
+      "parameters": {
+        "workflowId": {
+          "__rl": true,
+          "value": "flocUJF4HeTxLdyw",
+          "mode": "list",
+          "cachedResultUrl": "/workflow/flocUJF4HeTxLdyw",
+          "cachedResultName": "2 - Document Processing"
+        },
+        "workflowInputs": {
+          "mappingMode": "defineBelow",
+          "value": {},
+          "matchingColumns": [],
+          "schema": [],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": true
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1.3,
+      "position": [
+        1136,
+        -32
+      ],
+      "id": "1f559305-259c-4097-8fe3-1753e76bf3f2",
+      "name": "Call 'Document Processing'",
+      "retryOnFail": true,
+      "maxTries": 2,
+      "onError": "continueErrorOutput"
+    },
+    {
+      "parameters": {
+        "mode": "combine",
+        "combineBy": "combineByPosition",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.merge",
+      "typeVersion": 3.2,
+      "position": [
+        944,
+        -32
+      ],
+      "id": "7b44ce73-78c8-4a73-98a1-03e19402ae52",
+      "name": "Merge"
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "32647649-d52b-4c68-90e0-9d2235fac1a7",
+              "name": "document_airtable_record_id",
+              "value": "={{ [$json.id] }}",
+              "type": "array"
+            },
+            {
+              "id": "4fe37b8a-e981-4784-bf95-be9fb54f0c10",
+              "name": "created_time",
+              "value": "={{ $json.createdTime }}",
+              "type": "string"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        768,
+        80
+      ],
+      "id": "5ed72920-1414-419e-9236-3eaa13036fa0",
+      "name": "Creating Airtable Record Field"
+    },
+    {
+      "parameters": {
+        "operation": "deleteRecord",
+        "base": {
+          "__rl": true,
+          "value": "appRAMRezVA0zjwWA",
+          "mode": "list",
+          "cachedResultName": "Enterprise Knowledge Management Platform",
+          "cachedResultUrl": "https://airtable.com/appRAMRezVA0zjwWA"
+        },
+        "table": {
+          "__rl": true,
+          "value": "tblKoY1HC2cewE0xG",
+          "mode": "list",
+          "cachedResultName": "Documents",
+          "cachedResultUrl": "https://airtable.com/appRAMRezVA0zjwWA/tblKoY1HC2cewE0xG"
+        },
+        "id": "={{ $('Merge').item.json.document_airtable_record_id[0] }}"
+      },
+      "type": "n8n-nodes-base.airtable",
+      "typeVersion": 2.2,
+      "position": [
+        1344,
+        64
+      ],
+      "id": "8d554c18-dd47-4d07-b17f-aca4393bf4aa",
+      "name": "Delete a record",
+      "credentials": {
+        "airtableTokenApi": {
+          "id": "JakJ5QqnRCltt6YG",
+          "name": "Airtable Personal Access Token account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "errorMessage": "Some Thing Went Wrong in Calling the (Document Processing Workflor) from Knowledge Intake Workflow"
+      },
+      "type": "n8n-nodes-base.stopAndError",
+      "typeVersion": 1,
+      "position": [
+        1552,
+        64
+      ],
+      "id": "2c048331-428b-45e6-aecc-072e8fab7d89",
+      "name": "Stop and Error"
+    },
+    {
+      "parameters": {
+        "errorMessage": "Some thing went wrong in creating airtable record for new document (Knowledge Intake Workflow)"
+      },
+      "type": "n8n-nodes-base.stopAndError",
+      "typeVersion": 1,
+      "position": [
+        592,
+        352
+      ],
+      "id": "43433cd7-9000-4652-9cf0-c6af46fd81c9",
+      "name": "Stop and Error1"
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Webhook": {
+      "main": [
+        [
+          {
+            "node": "Validate Request",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Validate Request": {
+      "main": [
+        [
+          {
+            "node": "Generate Document Metadata",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Generate Document Metadata": {
+      "main": [
+        [
+          {
+            "node": "Read/Write Files from Disk",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Read/Write Files from Disk": {
+      "main": [
+        [
+          {
+            "node": "Create a record",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Merge",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Create a record": {
+      "main": [
+        [
+          {
+            "node": "Creating Airtable Record Field",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Stop and Error1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Merge": {
+      "main": [
+        [
+          {
+            "node": "Call 'Document Processing'",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Creating Airtable Record Field": {
+      "main": [
+        [
+          {
+            "node": "Merge",
+            "type": "main",
+            "index": 1
+          }
+        ]
+      ]
+    },
+    "Call 'Document Processing'": {
+      "main": [
+        [],
+        [
+          {
+            "node": "Delete a record",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Delete a record": {
+      "main": [
+        [
+          {
+            "node": "Stop and Error",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate",
+    "availableInMCP": false
+  },
+  "versionId": "f2ed8841-cb37-48b0-bb40-3f25fea89d22",
+  "meta": {
+    "templateCredsSetupCompleted": true,
+    "instanceId": "22a94396d635bdc18c036410c0b06da7851292b894f2255bca52f69454134ddc"
+  },
+  "nodeGroups": [],
+  "id": "eWBSjSYGPsQiWcO6",
+  "tags": []
+}

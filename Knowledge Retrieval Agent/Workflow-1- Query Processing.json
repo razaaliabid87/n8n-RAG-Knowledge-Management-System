@@ -1,0 +1,777 @@
+{
+  "name": "1- Query Processing",
+  "nodes": [
+    {
+      "parameters": {
+        "jsCode": "// Copy the grouped object\nconst request = { ...$json.search_request };\n\n// --------------------------------------------------\n// Validate Query\n// --------------------------------------------------\nif (!request.query) {\n\tthrow new Error(\"Query is required.\");\n}\n\nif (typeof request.query !== \"string\") {\n\tthrow new Error(\"Query must be a string.\");\n}\n\nrequest.query = request.query.trim();\n\nif (request.query.length === 0) {\n\tthrow new Error(\"Query cannot be empty.\");\n}\n\n// --------------------------------------------------\n// Validate top_k\n// --------------------------------------------------\nif (\n\trequest.top_k === undefined ||\n\trequest.top_k === null ||\n\trequest.top_k === \"\"\n) {\n\trequest.top_k = 10;\n}\n\nrequest.top_k = parseInt(request.top_k, 10);\n\nif (isNaN(request.top_k) || request.top_k < 1) {\n\tthrow new Error(\"top_k must be a positive integer.\");\n}\n\n// Enterprise safety limit\nif (request.top_k > 50) {\n\trequest.top_k = 50;\n}\n\n// --------------------------------------------------\n// Return same structure\n// --------------------------------------------------\nreturn {\n\tjson: {\n\t\tsearch_request: request\n\t}\n};"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -432,
+        -80
+      ],
+      "id": "2bd59f9f-762e-44e1-8769-45b466e3e500",
+      "name": "Validate Request",
+      "onError": "continueRegularOutput",
+      "notes": "Purpose:\nEnsure query exists.\nEnsure query is not empty.\nTrim whitespace.\nSet default top_k if missing.\nPreserve every other incoming field.\nStop the workflow immediately if the request is invalid."
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "3471b23b-8842-466e-b711-0f78cfd59e1d",
+              "name": "search_request.query",
+              "value": "={{ $json.body.query }}",
+              "type": "string"
+            },
+            {
+              "id": "854a3920-3598-4a3b-a9e3-630f6e10d0b9",
+              "name": "search_request.company",
+              "value": "={{ $json.body.company }}",
+              "type": "string"
+            },
+            {
+              "id": "e35dfc7b-1fb1-4729-8415-8147dc2a4dd0",
+              "name": "search_request.department",
+              "value": "={{ $json.body.department }}",
+              "type": "string"
+            },
+            {
+              "id": "0db3fd34-df05-455f-bcfe-37a5318a0841",
+              "name": "search_request.customer_name",
+              "value": "={{ $json.body.customer_name }}",
+              "type": "string"
+            },
+            {
+              "id": "0a71d4f6-614c-4385-8ea7-db06395da123",
+              "name": "search_request.customer_id",
+              "value": "={{ $json.body.customer_id }}",
+              "type": "string"
+            },
+            {
+              "id": "2ed5e0c7-b396-48f4-8a89-029e7b326040",
+              "name": "search_request.correlation_id",
+              "value": "={{ $json.body.correlation_id }}",
+              "type": "string"
+            },
+            {
+              "id": "29696797-301b-496a-bfbd-82c6dc457aaf",
+              "name": "search_request.customer_type",
+              "value": "={{ $json.body.customer_name }}",
+              "type": "string"
+            },
+            {
+              "id": "a2db6bd8-5d09-4c06-a22d-b2dcd308c26b",
+              "name": "search_request.source",
+              "value": "={{ $json.body.source }}",
+              "type": "string"
+            },
+            {
+              "id": "d44f9894-a4b1-446c-8e98-41e98b2dfd5e",
+              "name": "search_request.top_k",
+              "value": "={{ Number($json.body.topy_k) }}",
+              "type": "number"
+            },
+            {
+              "id": "6b6cbb92-9f2d-4253-b9c4-dee3ea56e8a0",
+              "name": "search_request.received_at",
+              "value": "={{ $now }}",
+              "type": "string"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        -720,
+        -64
+      ],
+      "id": "646a8bf6-a70f-424b-b135-384786df7f68",
+      "name": "Data Cleaning & Grouping"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "c45ca752-0ca7-4ea0-a770-9ce80e45c406",
+              "leftValue": "={{ $json.error }}",
+              "rightValue": "",
+              "operator": {
+                "type": "string",
+                "operation": "exists",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        -256,
+        -80
+      ],
+      "id": "5e55722c-a7f6-4b65-a132-e2719a63bd35",
+      "name": "If"
+    },
+    {
+      "parameters": {
+        "errorMessage": "={{ \"Error in Valdation Code Node : \"+$json.error }}"
+      },
+      "type": "n8n-nodes-base.stopAndError",
+      "typeVersion": 1,
+      "position": [
+        -16,
+        -288
+      ],
+      "id": "5c6911f1-3413-4203-aab9-9874e7ac975b",
+      "name": "Error on Validation Failed"
+    },
+    {
+      "parameters": {
+        "jsCode": "const request = { ...$json.search_request };\n\n// Preserve original query\nconst originalQuery = request.query;\n\n// Normalize query\nlet normalized = originalQuery;\n\n// Remove control characters\nnormalized = normalized.replace(/[\\u0000-\\u001F\\u007F]/g, \" \");\n\n// Replace tabs/newlines with spaces\nnormalized = normalized.replace(/\\s+/g, \" \");\n\n// Trim\nnormalized = normalized.trim();\n\n// Lowercase\nnormalized = normalized.toLowerCase();\n\n// Store separately\nrequest.normalized_query = normalized;\n\nreturn {\n  json: {\n    search_request: request\n  }\n};"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -240,
+        160
+      ],
+      "id": "f869a522-f460-44e9-8db8-68fecf56af59",
+      "name": "Normalize Query",
+      "notes": "The objective of this node is NOT to change the meaning of the user's question. Its purpose is to produce a clean, consistent version of the query so the embedding model receives standardized input. NEVER overwrite the original query, so I created another field \"normalized_query\"."
+    },
+    {
+      "parameters": {
+        "jsCode": "const request = { ...$json.search_request };\n\n// ------------------------------\n// Generate Metadata\n// ------------------------------\n\nconst metadata = {\n\t//request_id: crypto.randomUUID(),\n  request_id: `REQ-${Date.now()}-${Math.floor(Math.random() * 1000000)}`,\n\n\tworkflow_name: \"Knowledge Query Processing\",\n\n\tworkflow_version: \"1.0\",\n\n\trequest_status: \"validated\",\n\n\tcreated_at: new Date().toISOString(),\n\n\tsearch_engine: \"qdrant\",\n\n\tembedding_provider: \"gemini\",\n\n\tembedding_model: \"gemini-embedding-001\"\n};\n\n// Return\nreturn {\n\tjson: {\n\t\tsearch_request: request,\n\t\trequest_metadata: metadata\n\t}\n};"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        0,
+        -80
+      ],
+      "id": "7a0990a6-78e0-4a94-8366-e72b281332d1",
+      "name": "Generate Request Metadata",
+      "notes": "Generate system metadata for the request. This metadata is used for:\n\n1. tracing requests through all workflows\n2. debugging\n3. logging\n4. analytics\n5. future distributed processing\nNOTE:\nThis node does not modify the query."
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://generativelanguage.googleapis.com/v1beta/models/gemini-embedding-001:embedContent",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "googlePalmApi",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "bodyParameters": {
+          "parameters": [
+            {
+              "name": "model",
+              "value": "gemini-embedding-001"
+            },
+            {
+              "name": "content.parts[0].text",
+              "value": "={{ $json.search_request.normalized_query }}"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [
+        32,
+        176
+      ],
+      "id": "07466a40-9604-4529-a1b0-7003cb4db27c",
+      "name": "Generate Query Embedding",
+      "retryOnFail": true,
+      "maxTries": 2,
+      "credentials": {
+        "googlePalmApi": {
+          "id": "gc8teQ0ZGq2c7NeG",
+          "name": "Google Gemini(PaLM) Api account 2"
+        }
+      },
+      "onError": "continueErrorOutput",
+      "notes": "This node converts the user's normalized_query into a dense vector using the same embedding model that was used when indexing documents in Knowledge Intake Agent (workflow-2)."
+    },
+    {
+      "parameters": {
+        "mode": "combine",
+        "combineBy": "combineByPosition",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.merge",
+      "typeVersion": 3.2,
+      "position": [
+        320,
+        -64
+      ],
+      "id": "570d80d7-537b-4d11-a4bd-da3eb7a9be94",
+      "name": "Merge"
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "87766262-9c3a-490f-9a9b-8d6ca1367e3f",
+              "name": "searchPayload.query",
+              "value": "={{ $json.embedding.values }}",
+              "type": "array"
+            },
+            {
+              "id": "26cef92e-cae3-43a2-b2be-5f2b9913bbb3",
+              "name": "searchPayload.limit",
+              "value": "={{ $json.search_request.top_k }}",
+              "type": "number"
+            },
+            {
+              "id": "bf6b741a-d38e-4dca-9640-327f391858e2",
+              "name": "searchPayload.with_payload",
+              "value": true,
+              "type": "boolean"
+            },
+            {
+              "id": "8e392784-3bdb-4814-86fe-5b7ff8478957",
+              "name": "searchPayload.with_vector",
+              "value": false,
+              "type": "boolean"
+            },
+            {
+              "id": "85529355-db1d-4dec-8a95-e116d961160c",
+              "name": "searchPayload.using",
+              "value": "text",
+              "type": "string"
+            }
+          ]
+        },
+        "includeOtherFields": true,
+        "include": "except",
+        "excludeFields": "embedding",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        528,
+        -160
+      ],
+      "id": "b4a9b3d1-96a7-4a64-b844-8dfc736a9b2d",
+      "name": "Prepare Qdrant Search Payload",
+      "notes": "Building the JSON payload exactly as Qdrant expects for vector search."
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://172.17.0.3:6333/collections/knowledge_base/points/query",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ $json.searchPayload }}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [
+        672,
+        48
+      ],
+      "id": "6f492ecd-e4d9-4ed0-b32c-70f42862a1f9",
+      "name": "Qdrant Vector Search",
+      "retryOnFail": true,
+      "maxTries": 2,
+      "onError": "continueErrorOutput",
+      "notes": "Search the knowledge_base collection using the query embedding and retrieve the most semantically similar chunks."
+    },
+    {
+      "parameters": {
+        "jsCode": "// ==========================================\n// Workflow 3 - Node 7\n// Retrieval Post-Processor\n// ==========================================\n\n// Qdrant already returns results sorted by score.\n// Create a copy instead of sorting again.\n// Copy results returned by Qdrant\nconst points = [...($json.result?.points || [])];\n\n// Ensure results are always sorted by similarity score (highest first)\n// This keeps the workflow independent of the vector database implementation.\npoints.sort((a, b) => (b.score ?? 0) - (a.score ?? 0));\n\n// Build structured chunks\nconst chunks = points.map((point, index) => ({\n    rank: index + 1,\n\n    // Search Information\n    score: point.score ?? 0,\n\n    // IDs\n    chunk_uuid: point.payload.chunk_uuid,\n    chunk_id: point.payload.chunk_id,\n    document_uuid: point.payload.document_uuid,\n    document_hash: point.payload.document_hash,\n\n    // Chunk Information\n    chunk_index: point.payload.chunk_index,\n    total_chunks: point.payload.total_chunks,\n  chunk_start:point.payload.chunk_start,\n  chunk_end:point.payload.chunk_end,\n    text: point.payload.text,\n\n    // Document Structure\n    section_title: point.payload.section_title,\n    section_level: point.payload.section_level,\n\n    // Classification\n    category: point.payload.category,\n    department: point.payload.department,\n\n    // File Information\n    file_name: point.payload.file_name,\n    file_extension: point.payload.file_extension,\n\n    // Processing Metadata\n    workflow_version: point.payload.workflow_version,\n    processing_state: point.payload.processing_state,\n    source: point.payload.source,\n    received_at: point.payload.received_at\n}));\n\n// Create formatted context for the LLM\nconst formatted_context = chunks.map(chunk => `\n### Result ${chunk.rank}\nSimilarity Score: ${(chunk.score ?? 0).toFixed(4)}\n\nDocument:\n${chunk.file_name}\n\nSection:\n${chunk.section_title}\n\nContent:\n${chunk.text}\n`.trim()).join('\\n\\n------------------------------------------------------------\\n\\n');\n\n// Return standardized retrieval object\nreturn [{\n    json: {\n      search_request: $json.search_request,\n      request_metadata: $json.request_metadata,\n        retrieval: {\n            /**total_results: chunks.length,\n            best_score: chunks.length ? chunks[0].score : 0,**/\n            formatted_context,\n            chunks\n        },\n      retrieval_metrics:$json.retrieval_metrics,\n        search_status: $json.search_status,\n        search_time: $json.search_time,\n      retrieval_version: \"1.0\",\n      retrieval_analytics: {\n    \n    documents_retrieved: new Set(\n        chunks.map(c => c.document_uuid)\n    ).size,\n\n    highest_score: chunks.length\n        ? Math.max(...chunks.map(c => c.score))\n        : 0,\n\n    lowest_score: chunks.length\n        ? Math.min(...chunks.map(c => c.score))\n        : 0,\n\n    average_score: chunks.length\n        ? Number(\n            (\n                chunks.reduce((sum, c) => sum + c.score, 0) /\n                chunks.length\n            ).toFixed(4)\n        )\n        : 0,\n\n    duplicate_documents:\n        chunks.length -\n        new Set(chunks.map(c => c.document_uuid)).size\n},\n     retrieval_status :$json.retrieval_status \n      \n    }\n}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1456,
+        -368
+      ],
+      "id": "3502f62d-ae66-4435-92f1-fbb154a0ca1d",
+      "name": "Retrieval Post-Processor",
+      "notes": "Convert the raw Qdrant response into a clean, standardized retrieval object that the rest of the RAG pipeline can consume.\n\nThis node:\n\n1. extracts only useful fields\n2. removes vectors and API metadata\n3. preserves similarity scores\n4. packages everything into a consistent structure"
+    },
+    {
+      "parameters": {
+        "jsCode": "// ==========================================\n// Workflow 3 - Similarity Threshold Filter\n// ==========================================\n\n// Production default.\n// Later replace with:\n// const MIN_SCORE = parseFloat($env.QDRANT_MIN_SIMILARITY || \"0.75\");\n\nconst MIN_SCORE = 0.50;\n\n// Get Qdrant results\nconst points = $json.result?.points || [];\n\n// Apply threshold\nconst filteredPoints = points.filter(point =>\n    (point.score ?? 0) >= MIN_SCORE\n);\n\n// ----------------------------\n// Determine retrieval status\n// ----------------------------\n\nlet retrievalStatus = \"SUCCESS\";\nlet retrievalReason = \"Relevant documents found.\";\n\nif (points.length === 0) {\n    retrievalStatus = \"EMPTY_COLLECTION\";\n    retrievalReason = \"Vector search returned no documents.\";\n}\nelse if (filteredPoints.length === 0) {\n    retrievalStatus = \"NO_MATCH\";\n    retrievalReason = \"No documents satisfied the similarity threshold.\";\n}\n\n// Return standardized output\nreturn [{\n    json: {\n\n             search_request:$json.search_request,\n      request_metadata: $json.request_metadata,\n      \n\n        result: {\n            points: filteredPoints\n        },\n\n        retrieval_status: {\n            status: retrievalStatus,\n            reason: retrievalReason\n        },\n\n        retrieval_metrics: {\n            threshold: MIN_SCORE,\n            total_results: points.length,\n            filtered_results: filteredPoints.length,\n            discarded_results: points.length - filteredPoints.length,\n            best_score: filteredPoints.length\n                ? filteredPoints[0].score\n                : 0\n        },\n\n        search_status: $json.status,\n        search_time: $json.time\n    }\n}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1024,
+        -240
+      ],
+      "id": "b83f0028-6b95-479c-8b51-e10847e8b118",
+      "name": "Similarity Threshold Filter",
+      "notes": "After retrieving candidates, discard chunks below a minimum similarity score.\n\nExample:\n\nScore >= 0.75  → Keep\nScore < 0.75   → Ignore\n\nOnly sufficiently relevant chunks continue through the pipeline.\n\nFiltering::::\nSUCCESS → Generate answer from retrieved knowledge.\nNO_MATCH → Tell the user no relevant information was found.\nEMPTY_COLLECTION → Tell the administrator the knowledge base has not been populated."
+    },
+    {
+      "parameters": {
+        "rules": {
+          "values": [
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 3
+                },
+                "conditions": [
+                  {
+                    "leftValue": "={{ $json.retrieval_status.status }}",
+                    "rightValue": "SUCCESS",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    },
+                    "id": "a8f5a01a-b6c5-45ba-88e1-2907ed7f25f2"
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "SUCCESS"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 3
+                },
+                "conditions": [
+                  {
+                    "id": "ea99132b-0b84-462b-bcec-abc7578c40fe",
+                    "leftValue": "={{ $json.retrieval_status.status }}",
+                    "rightValue": "NO_MATCH",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals",
+                      "name": "filter.operator.equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "NO_MATCH"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 3
+                },
+                "conditions": [
+                  {
+                    "id": "5b6da15f-315a-4367-b5c0-0e1760b94e8e",
+                    "leftValue": "={{ $json.retrieval_status.status }}",
+                    "rightValue": "EMPTY_COLLECTION",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals",
+                      "name": "filter.operator.equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "EMPTY_COLLECTION"
+            }
+          ]
+        },
+        "options": {
+          "fallbackOutput": "extra"
+        }
+      },
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 3.4,
+      "position": [
+        1200,
+        -144
+      ],
+      "id": "20e00233-153b-4d71-b35b-fe490b70788d",
+      "name": "Switch"
+    },
+    {
+      "parameters": {
+        "errorMessage": "Something Went Wrong in Knowledge Retrieval Agen (1-Query Processing)"
+      },
+      "type": "n8n-nodes-base.stopAndError",
+      "typeVersion": 1,
+      "position": [
+        1216,
+        192
+      ],
+      "id": "4330a73c-d782-4766-9ea6-600ea7733211",
+      "name": "Error Message"
+    },
+    {
+      "parameters": {
+        "workflowId": {
+          "__rl": true,
+          "value": "21Nl53i7mj8lNvYJ",
+          "mode": "list",
+          "cachedResultUrl": "/workflow/21Nl53i7mj8lNvYJ",
+          "cachedResultName": "2 - Context Optimization Engine"
+        },
+        "workflowInputs": {
+          "mappingMode": "defineBelow",
+          "value": {},
+          "matchingColumns": [],
+          "schema": [],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": true
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1.3,
+      "position": [
+        1664,
+        -368
+      ],
+      "id": "33147557-bcd6-4bee-8021-db3dc15d7d60",
+      "name": "Call '2 - Context Optimization Engine'",
+      "retryOnFail": true,
+      "maxTries": 2,
+      "onError": "continueErrorOutput"
+    },
+    {
+      "parameters": {
+        "mode": "combine",
+        "combineBy": "combineByPosition",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.merge",
+      "typeVersion": 3.2,
+      "position": [
+        816,
+        -144
+      ],
+      "id": "ced54640-a55a-44b8-a74b-54c759a257e7",
+      "name": "Merge1"
+    },
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "37cdeb6d-cbdf-43be-a281-1352e6519f50",
+        "responseMode": "lastNode",
+        "responseData": "allEntries",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2.1,
+      "position": [
+        -1088,
+        -112
+      ],
+      "id": "2debb6ad-2d4e-40b4-a7f3-324f4b2629de",
+      "name": "Webhook",
+      "webhookId": "37cdeb6d-cbdf-43be-a281-1352e6519f50"
+    },
+    {
+      "parameters": {
+        "errorMessage": "Something went wrong in Generate Query Embedding in Query Processing Workflow"
+      },
+      "type": "n8n-nodes-base.stopAndError",
+      "typeVersion": 1,
+      "position": [
+        64,
+        432
+      ],
+      "id": "7168b906-1e05-4579-a4f7-6d766227331d",
+      "name": "Stop and Error"
+    },
+    {
+      "parameters": {
+        "errorMessage": "Something went wrong in Qdrant Vector Search in Query Processing Workflow"
+      },
+      "type": "n8n-nodes-base.stopAndError",
+      "typeVersion": 1,
+      "position": [
+        704,
+        288
+      ],
+      "id": "fb68a61a-6cc4-426d-8ca0-e7c74f035705",
+      "name": "Stop and Error1"
+    },
+    {
+      "parameters": {
+        "errorMessage": "Something went wrong in Calling Context Optimization Engine' from Query Processing Workflow"
+      },
+      "type": "n8n-nodes-base.stopAndError",
+      "typeVersion": 1,
+      "position": [
+        1872,
+        -272
+      ],
+      "id": "3ffc6a94-55f5-4784-9f3a-7d670fc92f9a",
+      "name": "Stop and Error2"
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Data Cleaning & Grouping": {
+      "main": [
+        [
+          {
+            "node": "Validate Request",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Validate Request": {
+      "main": [
+        [
+          {
+            "node": "If",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "If": {
+      "main": [
+        [
+          {
+            "node": "Error on Validation Failed",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Normalize Query",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Normalize Query": {
+      "main": [
+        [
+          {
+            "node": "Generate Request Metadata",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Generate Request Metadata": {
+      "main": [
+        [
+          {
+            "node": "Generate Query Embedding",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Merge",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Generate Query Embedding": {
+      "main": [
+        [
+          {
+            "node": "Merge",
+            "type": "main",
+            "index": 1
+          }
+        ],
+        [
+          {
+            "node": "Stop and Error",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Merge": {
+      "main": [
+        [
+          {
+            "node": "Prepare Qdrant Search Payload",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare Qdrant Search Payload": {
+      "main": [
+        [
+          {
+            "node": "Qdrant Vector Search",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Merge1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Qdrant Vector Search": {
+      "main": [
+        [
+          {
+            "node": "Merge1",
+            "type": "main",
+            "index": 1
+          }
+        ],
+        [
+          {
+            "node": "Stop and Error1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Similarity Threshold Filter": {
+      "main": [
+        [
+          {
+            "node": "Switch",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Retrieval Post-Processor": {
+      "main": [
+        [
+          {
+            "node": "Call '2 - Context Optimization Engine'",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Switch": {
+      "main": [
+        [
+          {
+            "node": "Retrieval Post-Processor",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [],
+        [],
+        [
+          {
+            "node": "Error Message",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Merge1": {
+      "main": [
+        [
+          {
+            "node": "Similarity Threshold Filter",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Webhook": {
+      "main": [
+        [
+          {
+            "node": "Data Cleaning & Grouping",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Call '2 - Context Optimization Engine'": {
+      "main": [
+        [],
+        [
+          {
+            "node": "Stop and Error2",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate",
+    "availableInMCP": false
+  },
+  "versionId": "fd11a902-537b-43a3-ae9e-df15cfbabfc1",
+  "meta": {
+    "instanceId": "22a94396d635bdc18c036410c0b06da7851292b894f2255bca52f69454134ddc"
+  },
+  "nodeGroups": [],
+  "id": "v6PYszY67hcMUqtE",
+  "tags": []
+}
